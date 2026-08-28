@@ -255,8 +255,24 @@ export interface SetGlobalProxyRequest {
 }
 
 // 在线更新配置
+export type UpdateMode = 'binary' | 'source'
+
 export interface UpdateConfigResponse {
-  /** 上一次更新前正在运行的版本号（带 v 前缀）；存在时可调用回退接口 */
+  /** 更新后端：binary 直接安装官方二进制；source 合并官方 tag 后本地构建 */
+  updateMode: UpdateMode
+  /** source 模式本地 Git 仓库绝对路径 */
+  sourceRepoPath?: string
+  /** source 模式允许 fast-forward 推进的本地分支 */
+  sourceBranch?: string
+  /** source 模式用于 fetch Release tag 的上游 Git URL */
+  sourceUpstreamGitUrl?: string
+  /** source 模式执行 git/npm/cargo 时显式使用的 PATH */
+  sourceBuildPath?: string
+  /** 最近一次成功 source update 的审计信息（不代表可自动回退源码） */
+  sourceLastMergedTag?: string
+  sourceLastMergedCommit?: string
+  sourcePreviousHead?: string
+  /** 上一次更新前正在运行的版本号（带 v 前缀）；存在时可调用二进制回退接口 */
   previousVersion?: string
   /** 上一次成功完成在线更新的时间（RFC3339） */
   lastAppliedAt?: string
@@ -269,6 +285,12 @@ export interface UpdateConfigResponse {
 }
 
 export interface SetUpdateConfigRequest {
+  updateMode?: UpdateMode
+  /** 空字符串表示清除；切换 source 时四项必须一次性完整提交 */
+  sourceRepoPath?: string
+  sourceBranch?: string
+  sourceUpstreamGitUrl?: string
+  sourceBuildPath?: string
   /** GitHub Personal Access Token；空字符串表示清除 */
   githubToken?: string
   autoApply?: boolean
@@ -307,7 +329,7 @@ export interface UpdateCheckInfo {
   currentVersion: string
   latestVersion: string
   hasUpdate: boolean
-  buildType: string
+  buildType: UpdateMode
   releaseName?: string
   releaseNotes?: string
   releaseUrl?: string
@@ -431,7 +453,7 @@ export interface StatsTimeFilter {
 export interface StatsFilter {
   /** 不传 = 全部；其它值 = 客户端 Key id */
   keyId?: number
-  /** 按账号分组筛选（仅影响 timeseries / by-credential，by-model 不支持） */
+  /** 按账号分组筛选；影响时序、模型、凭据和客户端 Key 分布 */
   group?: string
 }
 
@@ -463,8 +485,13 @@ export interface TimeSeriesPoint {
 export interface ModelDistribution {
   model: string
   calls: number
+  errors: number
   inputTokens: number
   outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  /** 上游计费 credits，用于折算费用 */
+  credits: number
 }
 
 export interface CredentialDistribution {
@@ -473,7 +500,38 @@ export interface CredentialDistribution {
   calls: number
   inputTokens: number
   outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
   errors: number
+  /** 上游计费 credits，用于折算费用 */
+  credits: number
+}
+
+export interface KeyDistribution {
+  keyId: number
+  name: string
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  errors: number
+  /** 上游计费 credits，用于折算费用 */
+  credits: number
+}
+
+/** 费用单价配置 */
+export interface PricingConfig {
+  /** 每 credit 折算金额；0 = 未配置，报表不展示金额 */
+  creditUnitPrice: number
+  /** 货币代码，如 USD / CNY */
+  currency: string
+}
+
+/** 更新费用单价配置（字段缺省表示不修改） */
+export interface SetPricingConfigRequest {
+  creditUnitPrice?: number
+  currency?: string
 }
 
 // ============ 请求链路追踪 ============

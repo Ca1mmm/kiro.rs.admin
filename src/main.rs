@@ -11,6 +11,7 @@ pub mod token;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::routing::get;
 use clap::Parser;
 use kiro::endpoint::{CliEndpoint, IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
@@ -325,6 +326,8 @@ async fn main() {
             tracing::info!("Admin UI 已启用: /admin");
             anthropic_app
                 .nest("/api/admin", admin_app)
+                // Axum 0.8 的 nest 根路径匹配 `/admin`，但不会匹配 `/admin/`。
+                .route("/admin/", get(admin_ui::index_handler))
                 .nest("/admin", admin_ui_app)
         }
     } else {

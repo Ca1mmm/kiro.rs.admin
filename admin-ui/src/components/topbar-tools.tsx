@@ -283,8 +283,9 @@ function CompactTools({ controls }: { controls: ToolControls }) {
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="icon" title="更多操作">
+        <Button variant="outline" size="icon" title="更多操作" className="relative">
           <MoreHorizontal className="h-4 w-4" />
+          {controls.updateCheck?.hasUpdate && <UpdateDot />}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -310,7 +311,10 @@ function CompactTools({ controls }: { controls: ToolControls }) {
           <Boxes />可用模型
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={controls.openImageUpdate}>
-          <UploadCloud />镜像在线更新
+          <UploadCloud />在线更新
+          {controls.updateCheck?.hasUpdate && (
+            <span className="ml-auto h-2 w-2 rounded-full bg-red-500" aria-label="发现新版本" />
+          )}
         </DropdownMenuItem>
         <ThrottleCompactItems {...throttleProps} />
         <SelfHealCompactItems />
@@ -395,7 +399,7 @@ function KeySettingsMenu({ onOpenKeyDialog }: { onOpenKeyDialog: () => void }) {
 }
 
 function imageUpdateTitle(updateCheck: ToolControls['updateCheck']) {
-  if (!updateCheck?.hasUpdate) return '镜像在线更新'
+  if (!updateCheck?.hasUpdate) return '在线更新'
   return `发现新版本 v${updateCheck.latestVersion}（当前 v${updateCheck.currentVersion}）`
 }
 

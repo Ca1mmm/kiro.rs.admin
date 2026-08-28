@@ -30,6 +30,27 @@ pub enum ToolCompatibilityMode {
     Raw,
 }
 
+/// 在线更新后端。
+///
+/// `binary` 保持原有 GitHub Release 二进制替换行为；`source` 会将 Release tag
+/// 合并到已提交且干净的本地分支，在隔离 worktree 中完成前端/Rust 构建后再部署。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    #[default]
+    Binary,
+    Source,
+}
+
+impl UpdateMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::Source => "source",
+        }
+    }
+}
+
 /// 自定义模型定义。
 ///
 /// 用户在 `config.json` 的 `customModels` 数组里声明客户端模型别名到 Kiro 后端
@@ -136,6 +157,38 @@ pub struct Config {
     /// Admin API 密钥（可选，启用 Admin API 功能）
     #[serde(default)]
     pub admin_api_key: Option<String>,
+
+    /// 在线更新后端。旧配置缺省为 binary，保持向后兼容。
+    #[serde(default)]
+    pub update_mode: UpdateMode,
+
+    /// source 模式使用的本地 Git 仓库绝对路径。
+    #[serde(default)]
+    pub source_repo_path: Option<String>,
+
+    /// source 模式允许被 fast-forward 推进的本地分支名。
+    #[serde(default)]
+    pub source_branch: Option<String>,
+
+    /// source 模式用于 fetch Release tag 的上游 Git URL。
+    #[serde(default)]
+    pub source_upstream_git_url: Option<String>,
+
+    /// source 模式执行 git/npm/cargo 时显式使用的 PATH。
+    #[serde(default)]
+    pub source_build_path: Option<String>,
+
+    /// 最近一次成功 source update 合并的 release tag。
+    #[serde(default)]
+    pub source_last_merged_tag: Option<String>,
+
+    /// 最近一次成功 source update 产生的 merge commit。
+    #[serde(default)]
+    pub source_last_merged_commit: Option<String>,
+
+    /// 最近一次 source update 推进前的本地分支 HEAD，仅用于审计提示。
+    #[serde(default)]
+    pub source_previous_head: Option<String>,
 
     /// 上一次成功更新前正在运行的版本号，用于在前端展示「回退到 vX.Y.Z」按钮。
     /// 实际回退动作通过 `<exe>.backup` 文件完成，无需访问网络。
@@ -258,6 +311,15 @@ pub struct Config {
     /// 请求用量日志（usage_log.*.jsonl + 聚合桶）保留天数（默认 31）。
     #[serde(default = "default_usage_log_retention_days")]
     pub usage_log_retention_days: u32,
+    /// 每个 credit 折算的货币单价（默认 0 = 未配置，报表不展示金额）。
+    ///
+    /// Kiro 上游只按 credit 计费，不下发金额。要在报表里看费用，
+    /// 需按自己的订阅套餐算出单价，例如「$20/月 含 1000 credits」→ 0.02。
+    #[serde(default)]
+    pub credit_unit_price: f64,
+    /// 费用展示使用的货币代码（默认 USD），仅用于前端格式化。
+    #[serde(default = "default_currency")]
+    pub currency: String,
 
     /// 端点特定的配置
     ///
@@ -378,6 +440,9 @@ fn default_trace_retention_days() -> u32 {
 fn default_usage_log_retention_days() -> u32 {
     31
 }
+fn default_currency() -> String {
+    "USD".to_string()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -400,6 +465,14 @@ impl Default for Config {
             proxy_username: None,
             proxy_password: None,
             admin_api_key: None,
+            update_mode: UpdateMode::Binary,
+            source_repo_path: None,
+            source_branch: None,
+            source_upstream_git_url: None,
+            source_build_path: None,
+            source_last_merged_tag: None,
+            source_last_merged_commit: None,
+            source_previous_head: None,
             update_previous_version: None,
             github_token: None,
             update_last_applied_at: None,
@@ -421,6 +494,8 @@ impl Default for Config {
             trace_enabled: default_trace_enabled(),
             trace_retention_days: default_trace_retention_days(),
             usage_log_retention_days: default_usage_log_retention_days(),
+            credit_unit_price: 0.0,
+            currency: default_currency(),
             endpoints: HashMap::new(),
             custom_models: Vec::new(),
             config_path: None,
@@ -560,5 +635,35 @@ mod tests {
         .unwrap();
         assert!(config.account_rpm_limit_enabled);
         assert_eq!(config.account_rpm_limit, 120);
+    }
+
+    #[test]
+    fn source_update_config_is_backward_compatible_and_uses_camel_case() {
+        use super::UpdateMode;
+
+        let existing: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(existing.update_mode, UpdateMode::Binary);
+        assert!(existing.source_repo_path.is_none());
+
+        let source: Config = serde_json::from_str(
+            r#"{
+                "updateMode": "source",
+                "sourceRepoPath": "/tmp/kiro.rs",
+                "sourceBranch": "custom/main",
+                "sourceUpstreamGitUrl": "https://github.com/ZyphrZero/kiro.rs.git",
+                "sourceBuildPath": "/usr/local/bin:/usr/bin:/bin"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(source.update_mode, UpdateMode::Source);
+        assert_eq!(source.source_branch.as_deref(), Some("custom/main"));
+
+        let serialized = serde_json::to_value(source).unwrap();
+        assert_eq!(serialized["updateMode"], "source");
+        assert_eq!(serialized["sourceRepoPath"], "/tmp/kiro.rs");
+        assert_eq!(
+            serialized["sourceBuildPath"],
+            "/usr/local/bin:/usr/bin:/bin"
+        );
     }
 }

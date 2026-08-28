@@ -5,3 +5,4 @@
 mod router;
 
 pub use router::create_admin_ui_router;
+pub(crate) use router::index_handler;

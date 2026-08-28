@@ -25,7 +25,7 @@ use super::{
         CreateClientKeyResponse, GlobalProxyResponse, ModelTestRequest,
         SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetDisabledRequest,
         SetGlobalProxyRequest,
-        SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetPriorityRequest,
+        SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetPricingConfigRequest, SetPriorityRequest,
         SetSelfHealConfigRequest,
         SetUpdateConfigRequest, StartIdcLoginRequest, StartSocialLoginRequest, SuccessResponse,
         UpdateAdminKeyRequest, UpdateClientKeyRequest, UpdateCredentialRequest,
@@ -601,6 +601,24 @@ pub async fn set_self_heal_config(
     }
 }
 
+/// GET /api/admin/config/pricing
+/// 读取费用单价配置（credits → 金额的换算单价）
+pub async fn get_pricing_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_pricing_config())
+}
+
+/// PUT /api/admin/config/pricing
+/// 设置费用单价配置
+pub async fn set_pricing_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetPricingConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.set_pricing_config(payload) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => e.into_http_response(),
+    }
+}
+
 /// GET /api/admin/config/log-governance
 /// 获取日志治理配置（trace 开关 / trace 保留 / usage 保留）
 pub async fn get_log_governance_config(State(state): State<AdminState>) -> impl IntoResponse {
@@ -724,7 +742,7 @@ pub async fn set_update_config(
     State(state): State<AdminState>,
     Json(payload): Json<SetUpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match state.service.set_update_config(payload) {
+    match state.service.set_update_config(payload).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
@@ -1161,6 +1179,22 @@ fn custom_stats_window(
     if end_date < start_date {
         return Err("endDate 不能早于 startDate".to_string());
     }
+    let inclusive_days = (end_date - start_date).num_days() + 1;
+    if inclusive_days > super::usage_stats::STATS_RETENTION_DAYS {
+        return Err(format!(
+            "自定义统计范围最多为 {} 天",
+            super::usage_stats::STATS_RETENTION_DAYS
+        ));
+    }
+    let today = Local::now().date_naive();
+    let earliest = today - Duration::days(super::usage_stats::STATS_RETENTION_DAYS - 1);
+    if start_date < earliest || end_date > today {
+        return Err(format!(
+            "可查询日期范围为 {} 至 {}",
+            earliest.format("%Y-%m-%d"),
+            today.format("%Y-%m-%d")
+        ));
+    }
     let start_ts = local_midnight_ts(start_date)?;
     let end_ts = local_midnight_ts(end_date + Duration::days(1))?;
     Ok(StatsQueryWindow {
@@ -1246,7 +1280,11 @@ pub async fn stats_by_model(
         Ok(parts) => parts,
         Err(message) => return stats_bad_request(message),
     };
-    let data = state.usage_aggregator.query_by_model(window, key_id);
+    let group = parse_group_filter(&params);
+    let cred_ids = group_to_cred_ids(&state, group.as_deref());
+    let data = state
+        .usage_aggregator
+        .query_by_model(window, key_id, cred_ids.as_ref());
     Json(data).into_response()
 }
 
@@ -1289,7 +1327,57 @@ pub async fn stats_by_credential(
                 "calls": d.calls,
                 "inputTokens": d.input_tokens,
                 "outputTokens": d.output_tokens,
+                "cacheCreationTokens": d.cache_creation_tokens,
+                "cacheReadTokens": d.cache_read_tokens,
                 "errors": d.errors,
+                "credits": d.credits,
+            })
+        })
+        .collect();
+    Json(enriched).into_response()
+}
+
+/// GET /api/admin/stats/by-key?range=24h|7d|30d
+pub async fn stats_by_key(
+    State(state): State<AdminState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let (window, key_id) = match stats_query_parts(&params) {
+        Ok(parts) => parts,
+        Err(message) => return stats_bad_request(message),
+    };
+    let group = parse_group_filter(&params);
+    let cred_ids = group_to_cred_ids(&state, group.as_deref());
+    let key_names: HashMap<u64, String> = state
+        .client_keys
+        .list()
+        .into_iter()
+        .map(|key| (key.id, key.name))
+        .collect();
+    let data = state
+        .usage_aggregator
+        .query_by_key(window, key_id, cred_ids.as_ref());
+    let enriched: Vec<serde_json::Value> = data
+        .into_iter()
+        .map(|d| {
+            let name = if d.key_id == 0 {
+                "Master API Key".to_string()
+            } else {
+                key_names
+                    .get(&d.key_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("已删除 Key #{}", d.key_id))
+            };
+            serde_json::json!({
+                "keyId": d.key_id,
+                "name": name,
+                "calls": d.calls,
+                "inputTokens": d.input_tokens,
+                "outputTokens": d.output_tokens,
+                "cacheCreationTokens": d.cache_creation_tokens,
+                "cacheReadTokens": d.cache_read_tokens,
+                "errors": d.errors,
+                "credits": d.credits,
             })
         })
         .collect();

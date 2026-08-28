@@ -153,6 +153,35 @@ export function formatCredits(value: number | null | undefined): string {
 }
 
 /**
+ * 费用展示：把 credits 按单价折算成金额。
+ *
+ * 上游只按 credit 计费、不下发金额，单价由 `GET /api/admin/config/pricing`
+ * 提供（0 表示未配置）。未配置时返回 null，调用方据此隐藏金额。
+ */
+export function formatCost(
+  credits: number | null | undefined,
+  unitPrice: number | null | undefined,
+  currency = 'USD',
+): string | null {
+  if (credits == null || !Number.isFinite(credits) || credits < 0) return null
+  if (unitPrice == null || !Number.isFinite(unitPrice) || unitPrice <= 0) return null
+
+  const amount = credits * unitPrice
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      // 金额可能很小，保证至少能看出量级
+      minimumFractionDigits: 2,
+      maximumFractionDigits: amount < 1 ? 4 : 2,
+    }).format(amount)
+  } catch {
+    // 非法货币代码兜底
+    return `${amount.toFixed(4)} ${currency}`
+  }
+}
+
+/**
  * 脱敏代理 URL：将 user:pass@host 中的认证信息替换为 xxx****xxx
  */
 /** 企业 SSO (external_idp) 的 authMethod 别名，与后端 canonicalize_auth_method_value 保持一致 */

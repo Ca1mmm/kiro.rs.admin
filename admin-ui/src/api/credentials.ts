@@ -33,6 +33,7 @@ import type {
   UpdateConfigResponse,
   SetUpdateConfigRequest,
   ImageUpdateResponse,
+  UpdateMode,
   UpdateCheckInfo,
   GitHubRateLimitInfo,
   UpdateAdminKeyRequest,
@@ -546,31 +547,42 @@ export async function setGlobalProxy(req: SetGlobalProxyRequest): Promise<Succes
   return data
 }
 
-// 获取镜像在线更新配置
+// 获取在线更新配置
 export async function getUpdateConfig(): Promise<UpdateConfigResponse> {
   const { data } = await api.get<UpdateConfigResponse>('/config/update')
   return data
 }
 
-// 设置镜像在线更新配置
+// 设置在线更新配置
 export async function setUpdateConfig(req: SetUpdateConfigRequest): Promise<UpdateConfigResponse> {
   const { data } = await api.put<UpdateConfigResponse>('/config/update', req)
   return data
 }
 
-// 拉取配置的 GHCR 镜像
-export async function pullUpdateImage(): Promise<ImageUpdateResponse> {
-  const { data } = await api.post<ImageUpdateResponse>('/system/update/pull')
+/** source prepare/apply 会执行依赖安装、前端构建及完整 Cargo 检查/测试/构建。 */
+const SOURCE_UPDATE_TIMEOUT_MS = 150 * 60 * 1000
+
+// 准备更新：binary 下载校验；source 隔离合并并完成全量构建测试
+export async function pullUpdateImage(mode: UpdateMode): Promise<ImageUpdateResponse> {
+  const { data } = await api.post<ImageUpdateResponse>(
+    '/system/update/pull',
+    undefined,
+    mode === 'source' ? { timeout: SOURCE_UPDATE_TIMEOUT_MS } : undefined,
+  )
   return data
 }
 
-// 拉取镜像并通过 Docker Compose 应用更新
-export async function applyImageUpdate(): Promise<ImageUpdateResponse> {
-  const { data } = await api.post<ImageUpdateResponse>('/system/update/apply')
+// 应用更新：source 模式会在二次 CAS 后 fast-forward 源码分支并安装构建产物
+export async function applyImageUpdate(mode: UpdateMode): Promise<ImageUpdateResponse> {
+  const { data } = await api.post<ImageUpdateResponse>(
+    '/system/update/apply',
+    undefined,
+    mode === 'source' ? { timeout: SOURCE_UPDATE_TIMEOUT_MS } : undefined,
+  )
   return data
 }
 
-// 通过本地备份 tag 回退到上一次更新前的镜像版本
+// 通过 `<exe>.backup` 回退运行二进制；不会 reset source 模式的 Git 分支
 export async function rollbackImageUpdate(): Promise<ImageUpdateResponse> {
   const { data } = await api.post<ImageUpdateResponse>('/system/update/rollback')
   return data

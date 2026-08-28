@@ -43,13 +43,20 @@ import {
   setUpdateConfig,
 } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { GitHubRateLimitInfo } from '@/types/api'
+import type {
+  GitHubRateLimitInfo,
+  SetUpdateConfigRequest,
+  UpdateMode,
+} from '@/types/api'
 import { Markdown } from '@/components/markdown'
 
 interface ImageUpdateDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
 }
+
+const DEFAULT_SOURCE_BRANCH = 'master'
+const DEFAULT_SOURCE_UPSTREAM = 'https://github.com/ZyphrZero/kiro.rs.git'
 
 /** 把 RFC3339 时间转成本地时区可读字符串。解析失败时原样返回。 */
 function formatDateTime(value: string): string {
@@ -65,6 +72,13 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
   const [lastOutput, setLastOutput] = useState('')
   const [tipsOpen, setTipsOpen] = useState(false)
   const [githubToken, setGithubToken] = useState('')
+  const [updateMode, setUpdateMode] = useState<UpdateMode>('binary')
+  const [sourceRepoPath, setSourceRepoPath] = useState('')
+  const [sourceBranch, setSourceBranch] = useState(DEFAULT_SOURCE_BRANCH)
+  const [sourceUpstreamGitUrl, setSourceUpstreamGitUrl] = useState(
+    DEFAULT_SOURCE_UPSTREAM,
+  )
+  const [sourceBuildPath, setSourceBuildPath] = useState('')
 
   const { data, isLoading } = useQuery({
     queryKey: ['update-config'],
@@ -138,9 +152,55 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
   useEffect(() => {
     if (!data) return
     setAutoApplyTime(data.autoApplyTime || '03:00')
+    setUpdateMode(data.updateMode || 'binary')
+    setSourceRepoPath(data.sourceRepoPath || '')
+    setSourceBranch(data.sourceBranch || DEFAULT_SOURCE_BRANCH)
+    setSourceUpstreamGitUrl(data.sourceUpstreamGitUrl || DEFAULT_SOURCE_UPSTREAM)
+    setSourceBuildPath(data.sourceBuildPath || '')
     // 弹窗打开时把 token 输入框清空：后端不回显明文，输入框为空时表示"保持原值"
     setGithubToken('')
   }, [data])
+
+  const updateModeMutation = useMutation({
+    mutationFn: (config: SetUpdateConfigRequest) => setUpdateConfig(config),
+    onSuccess: (res) => {
+      queryClient.setQueryData(['update-config'], res)
+      queryClient.invalidateQueries({ queryKey: ['system-update-check'] })
+      toast.success(
+        res.updateMode === 'source'
+          ? '已保存源码合并更新方式'
+          : '已保存官方二进制更新方式',
+      )
+    },
+    onError: (err) => toast.error(`保存更新方式失败: ${extractErrorMessage(err)}`),
+  })
+
+  const saveUpdateMode = () => {
+    const config = {
+      updateMode,
+      sourceRepoPath: sourceRepoPath.trim(),
+      sourceBranch: sourceBranch.trim(),
+      sourceUpstreamGitUrl: sourceUpstreamGitUrl.trim(),
+      sourceBuildPath: sourceBuildPath.trim(),
+    }
+
+    if (
+      config.updateMode === 'source' &&
+      (!config.sourceRepoPath ||
+        !config.sourceBranch ||
+        !config.sourceUpstreamGitUrl ||
+        !config.sourceBuildPath)
+    ) {
+      toast.error('源码仓库、分支、上游 URL 和构建 PATH 均不能为空')
+      return
+    }
+    if (config.updateMode === 'source' && !config.sourceRepoPath.startsWith('/')) {
+      toast.error('源码仓库必须是以 / 开头的绝对路径')
+      return
+    }
+
+    updateModeMutation.mutate(config)
+  }
 
   const githubTokenMutation = useMutation({
     mutationFn: (token: string) => setUpdateConfig({ githubToken: token }),
@@ -173,16 +233,16 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
   })
 
   const pullMutation = useMutation({
-    mutationFn: pullUpdateImage,
+    mutationFn: (mode: UpdateMode) => pullUpdateImage(mode),
     onSuccess: (res) => {
       setLastOutput(res.output || res.message)
       toast.success(res.message)
     },
-    onError: (err) => toast.error(`拉取失败: ${extractErrorMessage(err)}`),
+    onError: (err) => toast.error(`准备失败: ${extractErrorMessage(err)}`),
   })
 
   const applyMutation = useMutation({
-    mutationFn: applyImageUpdate,
+    mutationFn: (mode: UpdateMode) => applyImageUpdate(mode),
     onSuccess: (res) => {
       setLastOutput(res.output || res.message)
       toast.success(res.message)
@@ -201,18 +261,59 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
     onError: (err) => toast.error(`回退失败: ${extractErrorMessage(err)}`),
   })
 
+  const sourceTaskPending =
+    (pullMutation.isPending && pullMutation.variables === 'source') ||
+    (applyMutation.isPending && applyMutation.variables === 'source')
+
   const busy =
     isLoading ||
     pullMutation.isPending ||
     applyMutation.isPending ||
     rollbackMutation.isPending ||
+    updateModeMutation.isPending ||
     autoApplyMutation.isPending ||
     autoApplyTimeMutation.isPending ||
     githubTokenMutation.isPending ||
     verifyTokenMutation.isPending
 
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && sourceTaskPending) {
+      toast.warning('源码更新任务仍在执行，完成前不能关闭窗口')
+      return
+    }
+    onOpenChange(nextOpen)
+  }
+
+  const handleApply = () => {
+    const mode = data?.updateMode ?? 'binary'
+    if (
+      mode === 'source' &&
+      !window.confirm(
+        '应用源码更新会二次校验 HEAD，仅以 fast-forward 推进本地源码分支，安装构建产物并退出当前进程；随后由进程守护器/部署环境接管重启。确认继续？',
+      )
+    ) {
+      return
+    }
+    applyMutation.mutate(data?.updateMode ?? 'binary')
+  }
+
+  const handleRollback = () => {
+    if (
+      (data?.updateMode ?? 'binary') === 'source' &&
+      !window.confirm(
+        '回退只会恢复运行二进制，不会 reset 或回退本地源码分支。确认继续？',
+      )
+    ) {
+      return
+    }
+    rollbackMutation.mutate()
+  }
+
+  const hasSourceAudit =
+    data?.sourceLastMergedTag || data?.sourceLastMergedCommit || data?.sourcePreviousHead
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         aria-describedby={undefined}
         className="sm:max-w-2xl max-h-[85vh] overflow-y-auto"
@@ -250,9 +351,12 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
                 >
                   <div className="mb-1 font-medium">在线更新机制</div>
                   <ul className="list-disc space-y-1 pl-4">
-                    <li>从 GitHub Releases 下载新版本二进制并校验 SHA256</li>
-                    <li>原子替换当前 <code className="font-mono">kiro-rs</code>，旧版备份到 <code className="font-mono">.backup</code></li>
-                    <li>进程退出后由容器重启策略接管重启</li>
+                    <li>binary 使用官方 Release 二进制并校验 SHA256</li>
+                    <li>source 合并官方 Release tag，通过隔离构建和测试后安装产物</li>
+                    <li>
+                      旧版运行文件保留为 <code className="font-mono">.backup</code>
+                    </li>
+                    <li>进程退出后由进程守护器/部署环境接管重启</li>
                   </ul>
                 </TooltipContent>
               </Tooltip>
@@ -309,8 +413,12 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
               </div>
               <div className="flex items-baseline gap-2">
                 <dt className="w-20 shrink-0 text-muted-foreground">构建类型</dt>
-                <dd className="font-mono">
-                  {updateCheck?.buildType || '加载中…'}
+                <dd>
+                  {updateCheck?.buildType === 'source'
+                    ? '源码合并构建'
+                    : updateCheck?.buildType === 'binary'
+                      ? '官方二进制'
+                      : '加载中…'}
                 </dd>
               </div>
               <div className="flex items-baseline gap-2">
@@ -351,11 +459,182 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
           </section>
 
           <section className="space-y-3 border-t pt-4">
+            <div className="text-sm font-medium text-foreground">更新方式</div>
+            <div
+              role="radiogroup"
+              aria-label="更新方式"
+              className="grid gap-2 sm:grid-cols-2"
+            >
+              <label
+                className={`flex cursor-pointer items-start gap-2 rounded-md border p-3 text-xs transition-colors ${
+                  updateMode === 'binary' ? 'border-primary bg-primary/5' : ''
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="update-mode"
+                  value="binary"
+                  checked={updateMode === 'binary'}
+                  onChange={() => setUpdateMode('binary')}
+                  disabled={busy || !data}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block font-medium text-foreground">官方二进制</span>
+                  <span className="text-muted-foreground">
+                    下载并校验官方 Release 二进制。
+                  </span>
+                </span>
+              </label>
+              <label
+                className={`flex cursor-pointer items-start gap-2 rounded-md border p-3 text-xs transition-colors ${
+                  updateMode === 'source' ? 'border-primary bg-primary/5' : ''
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="update-mode"
+                  value="source"
+                  checked={updateMode === 'source'}
+                  onChange={() => setUpdateMode('source')}
+                  disabled={busy || !data}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block font-medium text-foreground">源码合并构建</span>
+                  <span className="text-muted-foreground">
+                    合并官方 Release tag 后在本地构建和测试。
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {updateMode === 'source' && (
+              <div className="space-y-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-1 text-xs">
+                    <span className="font-medium text-foreground">源码仓库绝对路径</span>
+                    <Input
+                      value={sourceRepoPath}
+                      onChange={(e) => setSourceRepoPath(e.target.value)}
+                      disabled={busy}
+                      placeholder="/opt/kiro.rs"
+                      className="font-mono text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs">
+                    <span className="font-medium text-foreground">本地分支</span>
+                    <Input
+                      value={sourceBranch}
+                      onChange={(e) => setSourceBranch(e.target.value)}
+                      disabled={busy}
+                      placeholder={DEFAULT_SOURCE_BRANCH}
+                      className="font-mono text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs">
+                    <span className="font-medium text-foreground">上游 Git URL</span>
+                    <Input
+                      value={sourceUpstreamGitUrl}
+                      onChange={(e) => setSourceUpstreamGitUrl(e.target.value)}
+                      disabled={busy}
+                      placeholder={DEFAULT_SOURCE_UPSTREAM}
+                      className="font-mono text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs">
+                    <span className="font-medium text-foreground">构建 PATH</span>
+                    <Input
+                      value={sourceBuildPath}
+                      onChange={(e) => setSourceBuildPath(e.target.value)}
+                      disabled={busy}
+                      placeholder="/usr/local/bin:/usr/bin:/bin"
+                      className="font-mono text-sm"
+                    />
+                  </label>
+                </div>
+
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-900 dark:text-amber-200">
+                  <div className="font-medium">源码更新安全要求</div>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">
+                    <li>
+                      主仓库必须是绝对 top-level，指定分支已 checkout，tracked/untracked
+                      全部干净。
+                    </li>
+                    <li>
+                      准备阶段只在 detached 临时 worktree 合并 Release tag，并运行 npm build +
+                      cargo check/test/release，可能耗时 2 小时以上。
+                    </li>
+                    <li>
+                      应用前执行二次 CAS，仅以 ff-only 推进源码分支；冲突、build/test 失败或
+                      HEAD 变化都会停止且不部署。
+                    </li>
+                    <li>回退只恢复运行二进制，不 reset Git。</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy || !data}
+              onClick={saveUpdateMode}
+            >
+              {updateModeMutation.isPending ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              <span className="ml-1.5">保存更新方式</span>
+            </Button>
+
+            {hasSourceAudit && (
+              <div className="rounded-md border bg-muted/30 p-3 text-xs">
+                <div className="mb-2 font-medium text-foreground">源码更新审计</div>
+                <dl className="space-y-1.5 text-muted-foreground">
+                  {data?.sourceLastMergedTag && (
+                    <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2">
+                      <dt>合并 tag</dt>
+                      <dd className="min-w-0 truncate" title={data.sourceLastMergedTag}>
+                        {data.sourceLastMergedTag}
+                      </dd>
+                    </div>
+                  )}
+                  {data?.sourceLastMergedCommit && (
+                    <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2">
+                      <dt>合并 commit</dt>
+                      <dd
+                        className="min-w-0 truncate font-mono"
+                        title={data.sourceLastMergedCommit}
+                      >
+                        {data.sourceLastMergedCommit}
+                      </dd>
+                    </div>
+                  )}
+                  {data?.sourcePreviousHead && (
+                    <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2">
+                      <dt>更新前 HEAD</dt>
+                      <dd
+                        className="min-w-0 truncate font-mono"
+                        title={data.sourcePreviousHead}
+                      >
+                        {data.sourcePreviousHead}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              </div>
+            )}
+          </section>
+
+          <section className="space-y-3 border-t pt-4">
             {data?.previousVersion && (
               <div className="text-xs text-muted-foreground">
                 上一版本：
                 <code className="font-mono">{data.previousVersion}</code>
-                （可一键回退）
+                {data.updateMode === 'source' ? '（仅可回退运行二进制）' : '（可一键回退）'}
               </div>
             )}
 
@@ -370,8 +649,13 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
               <div className="text-xs">
                 <div className="font-medium text-foreground">无人值守自动更新</div>
                 <div className="text-muted-foreground">
-                  开启后服务每天到指定时间自动检查新版本，发现新版即下载二进制并重启。
+                  开启后服务每天自动检查，按已保存的更新方式准备并应用新版，重启由进程守护器/部署环境接管。
                 </div>
+                {data?.updateMode === 'source' && (
+                  <div className="mt-1 text-amber-700 dark:text-amber-400">
+                    源码自动更新会运行完整合并、构建和测试；安全校验失败即停止，成功推进的源码分支不会随二进制回退。
+                  </div>
+                )}
               </div>
               <Switch
                 checked={!!data?.autoApply}
@@ -493,23 +777,31 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
               type="button"
               variant="outline"
               disabled={busy}
-              onClick={() => pullMutation.mutate()}
+              onClick={() => pullMutation.mutate(data?.updateMode ?? 'binary')}
             >
               {pullMutation.isPending ? (
                 <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
               ) : (
                 <Download className="h-4 w-4 mr-2" />
               )}
-              拉取镜像
+              {pullMutation.isPending
+                ? pullMutation.variables === 'source'
+                  ? '合并构建中…'
+                  : '下载中…'
+                : (data?.updateMode ?? 'binary') === 'source'
+                  ? '准备源码更新'
+                  : '下载二进制'}
             </Button>
             <Button
               type="button"
               variant="outline"
               disabled={busy || !data?.previousVersion}
-              onClick={() => rollbackMutation.mutate()}
+              onClick={handleRollback}
               title={
                 data?.previousVersion
-                  ? `回退到 ${data.previousVersion}`
+                  ? data.updateMode === 'source'
+                    ? `仅回退运行二进制到 ${data.previousVersion}，不回退源码分支`
+                    : `回退到 ${data.previousVersion}`
                   : '尚未记录可回退的版本'
               }
             >
@@ -524,10 +816,10 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
           <Button
             type="button"
             disabled={busy || !updateCheck?.hasUpdate}
-            onClick={() => applyMutation.mutate()}
+            onClick={handleApply}
             title={
               updateCheck?.hasUpdate
-                ? `更新到 v${updateCheck.latestVersion} 并重启`
+                ? `应用 v${updateCheck.latestVersion} 并重启`
                 : updateCheck?.currentVersion
                   ? `当前已是最新版本 v${updateCheck.currentVersion}`
                   : '正在检查更新…'
@@ -538,7 +830,11 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
             ) : (
               <UploadCloud className="h-4 w-4 mr-2" />
             )}
-            更新并重启
+            {applyMutation.isPending
+              ? applyMutation.variables === 'source'
+                ? '合并构建中…'
+                : '应用中…'
+              : '应用更新并重启'}
           </Button>
         </DialogFooter>
       </DialogContent>

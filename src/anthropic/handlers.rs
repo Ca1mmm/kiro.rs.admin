@@ -249,6 +249,17 @@ pub(crate) fn last_attempt_outcome(tracer: &RequestTracer) -> Option<&'static st
     Some(canonical_attempt_outcome(&last))
 }
 
+/// 返回最后一次实际上游尝试命中的凭据；没有上游尝试时为 0。
+/// 必须在 finalize 取走 attempts 前调用。
+fn last_attempt_credential_id(tracer: &RequestTracer) -> u64 {
+    tracer
+        .attempts
+        .lock()
+        .last()
+        .map(|attempt| attempt.credential_id)
+        .unwrap_or(0)
+}
+
 fn canonical_attempt_outcome(value: &str) -> &'static str {
     match value {
         outcome::QUOTA_EXHAUSTED => outcome::QUOTA_EXHAUSTED,
@@ -861,7 +872,15 @@ async fn handle_stream_request(
     {
         Ok(resp) => resp,
         Err(e) => {
-            hook.record(0, input_tokens, 0, 0, 0, 0.0, "error");
+            hook.record(
+                last_attempt_credential_id(&tracer),
+                input_tokens,
+                0,
+                0,
+                0,
+                0.0,
+                "error",
+            );
             // 重试链路全部失败、未开始返回内容：error_type 取最后一跳分类
             tracer.finalize(
                 "error",
@@ -1099,7 +1118,15 @@ async fn handle_non_stream_request(
     {
         Ok(resp) => resp,
         Err(e) => {
-            hook.record(0, input_tokens, 0, 0, 0, 0.0, "error");
+            hook.record(
+                last_attempt_credential_id(&tracer),
+                input_tokens,
+                0,
+                0,
+                0,
+                0.0,
+                "error",
+            );
             tracer.finalize(
                 "error",
                 last_attempt_outcome(&tracer),

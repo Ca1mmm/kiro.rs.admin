@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Activity, Calendar, Coins, Cpu, KeyRound, Server } from 'lucide-react'
+import { Activity, Calendar, Coins, Cpu, KeyRound, Server, Wallet } from 'lucide-react'
 import { useByCredential, useByModel, useOverview, useTimeSeries } from '@/hooks/use-stats'
 import { useClientKeys } from '@/hooks/use-client-keys'
 import { useGroupOptions } from '@/hooks/use-groups'
@@ -19,7 +19,9 @@ import type {
 import { TimeSeriesChart } from '@/components/charts/time-series-chart'
 import { ModelPieChart } from '@/components/charts/model-pie-chart'
 import { CredentialBarChart } from '@/components/charts/credential-bar-chart'
-import { cn, formatCredits, formatNumber } from '@/lib/utils'
+import { cn, formatCost, formatCredits, formatNumber } from '@/lib/utils'
+import { PricingCard } from '@/components/pricing-card'
+import { usePricingConfig } from '@/hooks/use-pricing'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -86,9 +88,11 @@ export function OverviewPage() {
   const seriesData = useMemo(() => series ?? [], [series])
   const modelData = useMemo(() => byModel ?? [], [byModel])
   const credData = useMemo(() => byCred ?? [], [byCred])
+  const { data: pricing } = usePricingConfig()
+  const unitPrice = pricing?.creditUnitPrice ?? 0
+  const currency = pricing?.currency ?? 'USD'
   const rangeStats = useMemo(() => aggregateSeries(seriesData), [seriesData])
   const selectedKeyLabel = selectedStatsKeyLabel(filters.keyFilter, keysData?.keys ?? [])
-  const groupFilterActive = filters.groupFilter !== 'all'
 
   return (
     <div>
@@ -98,7 +102,10 @@ export function OverviewPage() {
         activeKeys={overview?.activeClientKeys ?? 0}
         stats={rangeStats}
         timeText={timeLabel(filters.timeFilter)}
+        unitPrice={unitPrice}
+        currency={currency}
       />
+      <PricingCard />
       <KeyFilterCard
         keyFilter={filters.keyFilter}
         keys={keysData?.keys ?? []}
@@ -125,8 +132,10 @@ export function OverviewPage() {
       <DistributionPanels
         byCred={credData}
         byModel={modelData}
+        unitPrice={unitPrice}
+        currency={currency}
         timeText={timeLabel(filters.timeFilter)}
-        groupFilterActive={groupFilterActive}
+        groupFilterActive={false}
       />
     </div>
   )
@@ -227,12 +236,17 @@ function StatsCards({
   activeKeys,
   stats,
   timeText,
+  unitPrice,
+  currency,
 }: {
   activeCredentials: number
   activeKeys: number
   stats: RangeStats
   timeText: string
+  unitPrice: number
+  currency: string
 }) {
+  const costText = formatCost(stats.credits, unitPrice, currency)
   const cards = [
     {
       icon: <Activity className="h-4 w-4" />,
@@ -250,6 +264,20 @@ function StatsCards({
       value: formatCredits(stats.credits),
       extra: <span className="text-[11px] text-muted-foreground">上游计费量</span>,
     },
+    ...(costText
+      ? [
+          {
+            icon: <Wallet className="h-4 w-4" />,
+            label: '费用',
+            value: costText,
+            extra: (
+              <span className="text-[11px] text-muted-foreground">
+                按 {unitPrice} {currency}/credit 折算
+              </span>
+            ),
+          },
+        ]
+      : []),
     {
       icon: <KeyRound className="h-4 w-4" />,
       label: '启用的客户端 Key',
@@ -265,7 +293,7 @@ function StatsCards({
   ]
 
   return (
-    <div className="mb-6 grid grid-cols-2 gap-3 max-[360px]:grid-cols-1 lg:grid-cols-5">
+    <div className="mb-6 grid grid-cols-2 gap-3 max-[360px]:grid-cols-1 lg:grid-cols-3 xl:grid-cols-6">
       {cards.map((card) => (
         <StatCard key={card.label} meta={card.meta ?? timeText} {...card} />
       ))}
@@ -535,16 +563,26 @@ function DistributionPanels({
   byModel,
   timeText,
   groupFilterActive,
+  unitPrice,
+  currency,
 }: {
   byCred: CredentialDistribution[]
   byModel: ModelDistribution[]
   timeText: string
   groupFilterActive: boolean
+  unitPrice: number
+  currency: string
 }) {
   return (
     <div className="mb-6 grid gap-4 lg:grid-cols-2">
-      <ModelPanel data={byModel} timeText={timeText} groupFilterActive={groupFilterActive} />
-      <CredentialPanel data={byCred} />
+      <ModelPanel
+        data={byModel}
+        timeText={timeText}
+        groupFilterActive={groupFilterActive}
+        unitPrice={unitPrice}
+        currency={currency}
+      />
+      <CredentialPanel data={byCred} unitPrice={unitPrice} currency={currency} />
     </div>
   )
 }
@@ -553,10 +591,14 @@ function ModelPanel({
   data,
   timeText,
   groupFilterActive,
+  unitPrice,
+  currency,
 }: {
   data: ModelDistribution[]
   timeText: string
   groupFilterActive: boolean
+  unitPrice: number
+  currency: string
 }) {
   return (
     <Card>
@@ -572,13 +614,24 @@ function ModelPanel({
           </p>
         )}
         <ModelPieChart data={data} />
-        {data.length > 0 && <ModelTable data={data} />}
+        {data.length > 0 && (
+          <ModelTable data={data} unitPrice={unitPrice} currency={currency} />
+        )}
       </CardContent>
     </Card>
   )
 }
 
-function ModelTable({ data }: { data: ModelDistribution[] }) {
+function ModelTable({
+  data,
+  unitPrice,
+  currency,
+}: {
+  data: ModelDistribution[]
+  unitPrice: number
+  currency: string
+}) {
+  const showCost = unitPrice > 0
   return (
     <div className="mt-3 max-h-32 overflow-auto text-[12px]">
       <table className="min-w-[420px] w-full">
@@ -588,6 +641,8 @@ function ModelTable({ data }: { data: ModelDistribution[] }) {
             <th className="text-right font-medium">调用</th>
             <th className="text-right font-medium">输入</th>
             <th className="text-right font-medium">输出</th>
+            <th className="text-right font-medium">Credit</th>
+            {showCost && <th className="text-right font-medium">费用</th>}
           </tr>
         </thead>
         <tbody>
@@ -597,6 +652,12 @@ function ModelTable({ data }: { data: ModelDistribution[] }) {
               <td className="text-right tabular-nums">{formatNumber(m.calls)}</td>
               <td className="text-right tabular-nums">{formatNumber(m.inputTokens)}</td>
               <td className="text-right tabular-nums">{formatNumber(m.outputTokens)}</td>
+              <td className="text-right tabular-nums">{formatCredits(m.credits)}</td>
+              {showCost && (
+                <td className="text-right tabular-nums">
+                  {formatCost(m.credits, unitPrice, currency) ?? '-'}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -605,7 +666,16 @@ function ModelTable({ data }: { data: ModelDistribution[] }) {
   )
 }
 
-function CredentialPanel({ data }: { data: CredentialDistribution[] }) {
+function CredentialPanel({
+  data,
+  unitPrice,
+  currency,
+}: {
+  data: CredentialDistribution[]
+  unitPrice: number
+  currency: string
+}) {
+  const showCost = unitPrice > 0
   return (
     <Card>
       <CardContent className="p-4 sm:p-5">
@@ -616,6 +686,34 @@ function CredentialPanel({ data }: { data: CredentialDistribution[] }) {
           </span>
         </div>
         <CredentialBarChart data={data} />
+        {data.length > 0 && (
+          <div className="mt-3 max-h-32 overflow-auto text-[12px]">
+            <table className="min-w-[320px] w-full">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="text-left font-medium pb-1">凭据</th>
+                  <th className="text-right font-medium">调用</th>
+                  <th className="text-right font-medium">Credit</th>
+                  {showCost && <th className="text-right font-medium">费用</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {data.map((c) => (
+                  <tr key={c.credentialId} className="border-t border-border/40">
+                    <td className="py-1 truncate">{c.email || `#${c.credentialId}`}</td>
+                    <td className="text-right tabular-nums">{formatNumber(c.calls)}</td>
+                    <td className="text-right tabular-nums">{formatCredits(c.credits)}</td>
+                    {showCost && (
+                      <td className="text-right tabular-nums">
+                        {formatCost(c.credits, unitPrice, currency) ?? '-'}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

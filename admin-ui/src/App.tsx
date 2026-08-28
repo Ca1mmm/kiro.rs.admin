@@ -4,7 +4,7 @@ import { LoginPage } from "@/components/login-page";
 import { Toaster } from "@/components/ui/sonner";
 import { ConfirmProvider } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
-import { Activity, KeyRound, Server, LogOut, Moon, Sun, ScrollText, FolderTree } from "lucide-react";
+import { Activity, BarChart3, KeyRound, Server, LogOut, Moon, Sun, ScrollText, FolderTree } from "lucide-react";
 import { TopbarTools } from "@/components/topbar-tools";
 
 function GithubIcon({ className }: { className?: string }) {
@@ -28,6 +28,11 @@ const OverviewPage = lazy(() =>
     default: m.OverviewPage,
   })),
 );
+const UsageReportPage = lazy(() =>
+  import("@/components/usage-report-page").then((m) => ({
+    default: m.UsageReportPage,
+  })),
+);
 const ClientKeysPage = lazy(() =>
   import("@/components/client-keys-page").then((m) => ({
     default: m.ClientKeysPage,
@@ -44,7 +49,7 @@ const GroupsPage = lazy(() =>
   })),
 );
 
-type Tab = "overview" | "credentials" | "keys" | "groups" | "traces";
+type Tab = "overview" | "reports" | "credentials" | "keys" | "groups" | "traces";
 
 const TABS: {
   key: Tab;
@@ -57,6 +62,12 @@ const TABS: {
     label: "概览",
     mobileLabel: "概览",
     icon: <Activity className="h-3.5 w-3.5" />,
+  },
+  {
+    key: "reports",
+    label: "报表",
+    mobileLabel: "报表",
+    icon: <BarChart3 className="h-3.5 w-3.5" />,
   },
   {
     key: "credentials",
@@ -88,6 +99,7 @@ function readTabFromHash(): Tab {
   const h = window.location.hash.replace(/^#\/?/, "");
   if (
     h === "credentials" ||
+    h === "reports" ||
     h === "keys" ||
     h === "groups" ||
     h === "overview" ||
@@ -230,14 +242,14 @@ function HeaderBrand({
   tab: Tab;
 }) {
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-2 xl:gap-3">
+    <div className="flex min-w-0 flex-1 items-center gap-2">
       <img
         src="/admin/kirors.png"
         alt="Kiro"
         className="size-8 shrink-0 object-contain xl:size-9"
         draggable={false}
       />
-      <span className="min-w-0 truncate text-sm font-semibold tracking-tight min-[380px]:text-base">
+      <span className="min-w-0 truncate text-sm font-semibold tracking-tight min-[380px]:text-base xl:hidden">
         Kiro Admin
       </span>
       <DesktopTabs tab={tab} onSwitchTab={onSwitchTab} />
@@ -253,7 +265,7 @@ function DesktopTabs({
   tab: Tab;
 }) {
   return (
-    <div className="ml-4 hidden items-center gap-1 rounded-full border border-border/60 p-0.5 xl:flex">
+    <div className="ml-2 hidden min-w-max shrink-0 items-center gap-0.5 rounded-full border border-border/60 p-0.5 xl:flex">
       {TABS.map((t) => (
         <TabButton
           key={t.key}
@@ -324,7 +336,7 @@ function MobileTabs({
   tab: Tab;
 }) {
   return (
-    <div className="mx-auto flex max-w-[1400px] items-center gap-1 overflow-x-auto px-3 pb-2 xl:hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="mx-auto flex max-w-[1400px] items-center gap-1 overflow-x-auto px-3 pb-2 md:justify-center xl:hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {TABS.map((t) => (
         <TabButton
           key={t.key}
@@ -351,8 +363,7 @@ function TabButton({
 }) {
   const className = mobile
     ? "h-8 min-w-[4.25rem] flex-1 overflow-hidden rounded-full px-2 text-[11px] min-[360px]:min-w-[4.75rem] min-[390px]:px-3 min-[390px]:text-xs md:min-w-0 md:flex-none md:px-3"
-    : "h-7 rounded-full px-3 text-xs";
-  const label = mobile ? tab.mobileLabel : tab.label;
+    : "h-7 rounded-full px-2.5 text-xs";
 
   return (
     <Button
@@ -362,9 +373,10 @@ function TabButton({
       onClick={() => onSwitchTab(tab.key)}
     >
       {tab.icon}
-      <span className={mobile ? "min-w-0 truncate" : undefined}>
-        {label}
+      <span className={mobile ? "min-w-0 truncate md:hidden" : undefined}>
+        {mobile ? tab.mobileLabel : tab.label}
       </span>
+      {mobile && <span className="hidden md:inline">{tab.label}</span>}
     </Button>
   );
 }
@@ -374,6 +386,7 @@ function AppMain({ onLogout, tab }: { onLogout: () => void; tab: Tab }) {
     <main className="mx-auto max-w-[1400px] px-4 md:px-8 py-8">
       <Suspense fallback={<div className="text-sm text-muted-foreground">加载中…</div>}>
         {tab === "overview" && <OverviewPage />}
+        {tab === "reports" && <UsageReportPage />}
         {tab === "credentials" && <Dashboard onLogout={onLogout} embedded />}
         {tab === "keys" && <ClientKeysPage />}
         {tab === "groups" && <GroupsPage />}

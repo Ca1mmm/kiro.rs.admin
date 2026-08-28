@@ -22,7 +22,7 @@ pub fn create_admin_ui_router() -> Router {
 }
 
 /// 处理首页请求
-async fn index_handler() -> impl IntoResponse {
+pub(crate) async fn index_handler() -> impl IntoResponse {
     serve_index()
 }
 

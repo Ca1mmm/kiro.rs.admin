@@ -31,3 +31,6 @@
 .ace-tool/
 .codegraph/
 .claude/
+.ai-tracker/
+# macOS Finder metadata
+.DS_Store

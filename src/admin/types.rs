@@ -567,6 +567,30 @@ pub struct SetLogGovernanceConfigRequest {
     pub usage_log_retention_days: Option<u32>,
 }
 
+// ============ 费用单价 ============
+
+/// 费用单价配置响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingConfigResponse {
+    /// 每 credit 折算的货币金额；0 表示未配置（报表不展示金额）
+    pub credit_unit_price: f64,
+    /// 货币代码，如 USD / CNY
+    pub currency: String,
+}
+
+/// 更新费用单价配置（字段缺省表示不修改）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPricingConfigRequest {
+    /// 每 credit 单价，需 >= 0；设为 0 表示关闭金额展示
+    #[serde(default)]
+    pub credit_unit_price: Option<f64>,
+    /// 货币代码，1..=8 个字符
+    #[serde(default)]
+    pub currency: Option<String>,
+}
+
 // ============ 代理池 ============
 
 /// 代理池条目
@@ -701,6 +725,27 @@ pub struct SetGlobalProxyRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateConfigResponse {
+    /// 更新后端：binary 直接安装官方二进制；source 合并官方 tag 后本地构建。
+    pub update_mode: crate::model::config::UpdateMode,
+    /// source 模式本地仓库绝对路径。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_repo_path: Option<String>,
+    /// source 模式允许推进的本地分支。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
+    /// source 模式上游 Git URL。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_upstream_git_url: Option<String>,
+    /// source 模式执行工具时显式使用的 PATH。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_build_path: Option<String>,
+    /// 最近一次 source update 成功合并的 tag/commit 与推进前 HEAD。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_last_merged_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_last_merged_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_previous_head: Option<String>,
     /// 上一次成功更新前正在运行的版本号（带 `v` 前缀），存在时前端可显示「回退」按钮。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_version: Option<String>,
@@ -719,6 +764,13 @@ pub struct UpdateConfigResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetUpdateConfigRequest {
+    /// 更新后端；不传则保持原值。
+    pub update_mode: Option<crate::model::config::UpdateMode>,
+    /// source 模式参数；空字符串表示清除，不传则保持原值。
+    pub source_repo_path: Option<String>,
+    pub source_branch: Option<String>,
+    pub source_upstream_git_url: Option<String>,
+    pub source_build_path: Option<String>,
     /// GitHub Personal Access Token；空字符串表示清除，未传则保持原值。
     pub github_token: Option<String>,
     /// 是否开启无人值守自动更新；不传则保持原值

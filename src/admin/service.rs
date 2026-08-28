@@ -27,7 +27,7 @@ use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::{
     IdcReloginCredentials, MultiTokenManager, RefreshTokenInvalidError,
 };
-use crate::model::config::Config;
+use crate::model::config::{Config, UpdateMode};
 
 use super::error::AdminServiceError;
 use super::proxy_pool::{GetUrlResult, ProxyPoolManager};
@@ -46,6 +46,7 @@ use super::types::{
     SetSelfHealConfigRequest, SetUpdateConfigRequest, StartIdcLoginRequest, StartIdcLoginResponse,
     StartSocialLoginRequest, StartSocialLoginResponse, UpdateCheckInfo, UpdateConfigResponse,
     UpdateCredentialRequest, UpdateRefreshTokenRequest,
+    PricingConfigResponse, SetPricingConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -175,6 +176,14 @@ struct CachedUpdateCheck {
 
 #[derive(Debug, Clone)]
 struct RuntimeUpdateConfig {
+    mode: UpdateMode,
+    source_repo_path: Option<String>,
+    source_branch: Option<String>,
+    source_upstream_git_url: Option<String>,
+    source_build_path: Option<String>,
+    source_last_merged_tag: Option<String>,
+    source_last_merged_commit: Option<String>,
+    source_previous_head: Option<String>,
     previous_version: Option<String>,
     last_applied_at: Option<String>,
     github_token: Option<String>,
@@ -185,6 +194,14 @@ struct RuntimeUpdateConfig {
 impl RuntimeUpdateConfig {
     fn from_config(config: &Config) -> Self {
         Self {
+            mode: config.update_mode,
+            source_repo_path: config.source_repo_path.clone(),
+            source_branch: config.source_branch.clone(),
+            source_upstream_git_url: config.source_upstream_git_url.clone(),
+            source_build_path: config.source_build_path.clone(),
+            source_last_merged_tag: config.source_last_merged_tag.clone(),
+            source_last_merged_commit: config.source_last_merged_commit.clone(),
+            source_previous_head: config.source_previous_head.clone(),
             previous_version: config.update_previous_version.clone(),
             last_applied_at: config.update_last_applied_at.clone(),
             github_token: config.github_token.clone(),
@@ -195,6 +212,14 @@ impl RuntimeUpdateConfig {
 
     fn response(&self) -> UpdateConfigResponse {
         UpdateConfigResponse {
+            update_mode: self.mode,
+            source_repo_path: self.source_repo_path.clone(),
+            source_branch: self.source_branch.clone(),
+            source_upstream_git_url: self.source_upstream_git_url.clone(),
+            source_build_path: self.source_build_path.clone(),
+            source_last_merged_tag: self.source_last_merged_tag.clone(),
+            source_last_merged_commit: self.source_last_merged_commit.clone(),
+            source_previous_head: self.source_previous_head.clone(),
             previous_version: self.previous_version.clone(),
             last_applied_at: self.last_applied_at.clone(),
             github_token_set: self
@@ -205,6 +230,37 @@ impl RuntimeUpdateConfig {
             auto_apply: self.auto_apply,
             auto_apply_time: self.auto_apply_time.clone(),
         }
+    }
+
+    fn source_config(
+        &self,
+    ) -> Result<super::source_update::SourceUpdateConfig, AdminServiceError> {
+        fn required(value: &Option<String>, label: &str) -> Result<String, AdminServiceError> {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    AdminServiceError::InvalidCredential(format!(
+                        "source 更新缺少配置：{}",
+                        label
+                    ))
+                })
+        }
+
+        let repo_path = PathBuf::from(required(&self.source_repo_path, "源码仓库路径")?);
+        if !repo_path.is_absolute() {
+            return Err(AdminServiceError::InvalidCredential(
+                "source 更新的源码仓库路径必须是绝对路径".to_string(),
+            ));
+        }
+        Ok(super::source_update::SourceUpdateConfig {
+            repo_path,
+            branch: required(&self.source_branch, "本地分支")?,
+            upstream_git_url: required(&self.source_upstream_git_url, "上游 Git URL")?,
+            build_path: required(&self.source_build_path, "构建工具 PATH")?,
+        })
     }
 }
 
@@ -220,8 +276,10 @@ pub struct AdminService {
     known_endpoints: HashSet<String>,
     /// 代理 IP 池管理器
     proxy_pool: ProxyPoolManager,
-    /// 在线镜像更新运行时配置
+    /// 在线更新运行时配置
     update_config: Mutex<RuntimeUpdateConfig>,
+    /// pull/apply/rollback 共用互斥，防止 staged/backup/source refs 并发损坏。
+    update_operation: tokio::sync::Mutex<()>,
     /// 最近一次"检查更新"结果（带 TTL，用于减少 GitHub API 调用）
     update_check_cache: Mutex<Option<CachedUpdateCheck>>,
     /// 进行中的 IdC 设备授权会话
@@ -232,6 +290,11 @@ pub struct AdminService {
     trace_store: Option<crate::admin::trace_db::SharedTraceStore>,
     /// 用量日志记录器（用于日志治理：保留天数运行时可改）
     usage_recorder: Option<crate::admin::usage_stats::SharedRecorder>,
+    /// 费用单价运行时值（credit 单价, 货币代码）
+    ///
+    /// `update_config_file` 只写磁盘、不改内存 Config，所以这里按本项目
+    /// 既有约定（如 trace_store 的原子量）单独持有运行时值。
+    pricing: Mutex<(f64, String)>,
 }
 
 /// Social 登录会话状态
@@ -356,24 +419,26 @@ fn parse_semver_core(value: &str) -> [u32; 3] {
     out
 }
 
-/// 当前构建类型。在线更新走"下载 GitHub Releases 二进制 + 进程退出由
-/// docker restart policy 接管重启"的方案。
-const BUILD_TYPE: &str = "binary";
+/// staged 路径按更新后端分离，检查更新响应中的 buildType 则读取运行时 mode。
 
-/// 暂存路径：下载到 `<exe>.staged`，原子替换前再 mv 到 `<exe>`。
-/// 暂存路径：下载到 `<exe>.staged-<version>`，原子替换前再 mv 到 `<exe>`。
-/// 文件名中带版本号，便于 apply 复用 pull 已下载的二进制（命中时跳过重新下载）。
-fn staged_binary_path(exe: &std::path::Path, version: &str) -> std::path::PathBuf {
+/// 暂存路径。binary 保持原有 `<exe>.staged-<version>` 命名；source 使用
+/// `<exe>.staged-source-<version>`，避免切换更新模式时误复用另一后端的产物。
+fn staged_binary_path(
+    exe: &std::path::Path,
+    version: &str,
+    mode: UpdateMode,
+) -> std::path::PathBuf {
     let mut s = exe.as_os_str().to_os_string();
-    s.push(format!(
-        ".staged-{}",
-        version.trim().trim_start_matches('v')
-    ));
+    let version = version.trim().trim_start_matches('v');
+    match mode {
+        UpdateMode::Binary => s.push(format!(".staged-{}", version)),
+        UpdateMode::Source => s.push(format!(".staged-source-{}", version)),
+    }
     std::path::PathBuf::from(s)
 }
 
-/// 清理目标版本之外的所有 staged 文件，避免之前下载的旧版本残留干扰。
-fn cleanup_other_staged(exe: &std::path::Path, keep_version: &str) {
+/// 清理目标产物之外的所有 staged 文件及 source sidecar，避免旧版本残留。
+fn cleanup_other_staged(exe: &std::path::Path, keep: Option<&std::path::Path>) {
     let dir = match exe.parent() {
         Some(d) => d,
         None => return,
@@ -382,11 +447,10 @@ fn cleanup_other_staged(exe: &std::path::Path, keep_version: &str) {
         Some(n) => n,
         None => return,
     };
-    let keep = format!(
-        "{}.staged-{}",
-        exe_name,
-        keep_version.trim().trim_start_matches('v')
-    );
+    let keep_name = keep
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str());
+    let keep_sidecar = keep_name.map(|name| format!("{}.source.json", name));
     let prefix = format!("{}.staged-", exe_name);
     let entries = match std::fs::read_dir(dir) {
         Ok(it) => it,
@@ -397,7 +461,9 @@ fn cleanup_other_staged(exe: &std::path::Path, keep_version: &str) {
             Ok(n) => n,
             Err(_) => continue,
         };
-        if name.starts_with(&prefix) && name != keep {
+        let is_kept = keep_name == Some(name.as_str())
+            || keep_sidecar.as_deref() == Some(name.as_str());
+        if name.starts_with(&prefix) && !is_kept {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -552,6 +618,10 @@ impl AdminService {
 
         let balance_cache = Self::load_balance_cache_from(&cache_path);
         let update_config = RuntimeUpdateConfig::from_config(token_manager.config());
+        let pricing = {
+            let cfg = token_manager.config();
+            (cfg.credit_unit_price, cfg.currency.clone())
+        };
 
         let svc = Self {
             token_manager,
@@ -561,11 +631,13 @@ impl AdminService {
             known_endpoints: known_endpoints.into_iter().collect(),
             proxy_pool: ProxyPoolManager::new(proxy_pool_path, token_manager_tls_backend),
             update_config: Mutex::new(update_config),
+            update_operation: tokio::sync::Mutex::new(()),
             update_check_cache: Mutex::new(None),
             idc_sessions: Arc::new(Mutex::new(HashMap::new())),
             social_sessions: Arc::new(Mutex::new(HashMap::new())),
             trace_store: None,
             usage_recorder: None,
+            pricing: Mutex::new(pricing),
         };
 
         // 后台任务：每 5 分钟清理过期的登录会话，防止内存泄漏
@@ -1105,19 +1177,18 @@ impl AdminService {
 
     /// 启动无人值守自动更新调度器。
     ///
-    /// 任务始终运行，每分钟唤醒一次：
-    /// - `update_auto_apply` 关闭时只是记录"未到点"，不做任何远端调用。
-    /// - 开启时，比较当前本地时间与 `update_auto_apply_time`，命中目标分钟
-    ///   就触发一次 `apply_image_update`。同一目标版本只会被自动应用一次。
+    /// 每 30 秒检查一次本地时间：到达计划时间后执行当天任务；若服务在计划
+    /// 时间未运行，则启动后补跑。检查或应用失败时每 15 分钟重试，成功或确认
+    /// 已是最新版本后，当天不再重复访问远端。
     pub fn start_auto_update_scheduler(self: &Arc<Self>) {
         let svc = Arc::clone(self);
         tokio::spawn(async move {
-            // 给 Docker socket / compose 元数据探测留点准备时间
+            // 给运行环境和网络留出准备时间。
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
-            // 同一分钟避免重复触发；记录最近一次应用过的"日期 + 版本"
-            let mut last_run_marker: Option<String> = None;
-            let mut last_applied_version: Option<String> = None;
+            let mut last_completed_date: Option<chrono::NaiveDate> = None;
+            let mut last_attempt_at: Option<DateTime<chrono::Local>> = None;
+            let retry_interval = Duration::minutes(15);
 
             loop {
                 let runtime = svc.update_config.lock().clone();
@@ -1125,27 +1196,25 @@ impl AdminService {
                     let target = parse_auto_apply_time(&runtime.auto_apply_time).ok();
                     if let Some((target_hour, target_minute)) = target {
                         let now = chrono::Local::now();
-                        let date_minute_marker = format!(
-                            "{}-{:02}:{:02}",
-                            now.format("%Y-%m-%d"),
-                            now.hour(),
-                            now.minute()
-                        );
+                        let today = now.date_naive();
+                        let target_reached =
+                            (now.hour(), now.minute()) >= (target_hour, target_minute);
+                        let completed_today = last_completed_date == Some(today);
+                        let retry_ready = last_attempt_at.is_none_or(|last_attempt| {
+                            now.signed_duration_since(last_attempt) >= retry_interval
+                        });
 
-                        let hit = now.hour() == target_hour && now.minute() == target_minute;
-                        let already_ran_this_minute =
-                            last_run_marker.as_deref() == Some(date_minute_marker.as_str());
-
-                        if hit && !already_ran_this_minute {
-                            last_run_marker = Some(date_minute_marker);
+                        if target_reached && !completed_today && retry_ready {
+                            last_attempt_at = Some(now);
                             let info = svc.check_update(true).await;
-                            if info.has_update
-                                && !info.latest_version.is_empty()
-                                && last_applied_version.as_deref()
-                                    != Some(info.latest_version.as_str())
-                            {
+                            if let Some(warning) = info.warning.as_deref() {
+                                tracing::warn!(
+                                    "自动更新检查失败，将在 15 分钟后重试：{}",
+                                    warning
+                                );
+                            } else if info.has_update && !info.latest_version.is_empty() {
                                 tracing::info!(
-                                    "自动更新：到达计划时间 {}，发现新版本 {}（当前 {}），开始应用",
+                                    "自动更新：计划时间 {} 已到，发现新版本 {}（当前 {}），开始应用",
                                     runtime.auto_apply_time,
                                     info.latest_version,
                                     info.current_version
@@ -1153,18 +1222,22 @@ impl AdminService {
                                 match svc.apply_image_update().await {
                                     Ok(res) => {
                                         tracing::info!("自动更新完成：{}", res.message);
-                                        last_applied_version = Some(info.latest_version);
+                                        last_completed_date = Some(today);
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("自动更新失败：{}", e);
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "自动更新失败，将在 15 分钟后重试：{}",
+                                            error
+                                        );
                                     }
                                 }
                             } else {
                                 tracing::info!(
-                                    "自动更新：到达计划时间 {}，但当前已是最新版本（{}）",
+                                    "自动更新：计划时间 {} 已到，当前已是最新版本（{}）",
                                     runtime.auto_apply_time,
                                     info.current_version
                                 );
+                                last_completed_date = Some(today);
                             }
                         }
                     } else {
@@ -1175,7 +1248,6 @@ impl AdminService {
                     }
                 }
 
-                // 30 秒粒度足以可靠命中目标分钟，又不会在系统时间漂移下错过
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
@@ -1494,173 +1566,330 @@ impl AdminService {
         self.update_config.lock().response()
     }
 
-    /// 更新在线更新配置。
-    pub fn set_update_config(
+    /// 更新在线更新配置。source 模式只有在仓库、分支、上游和工具 PATH
+    /// 全部配置后才能启用，避免保存一个必然无法执行的自动更新状态。
+    pub async fn set_update_config(
         &self,
         req: SetUpdateConfigRequest,
     ) -> Result<UpdateConfigResponse, AdminServiceError> {
-        // 在写入运行时之前先校验时间格式，并规范化成两位补零的 HH:MM
-        let normalized_time = match req.auto_apply_time.as_deref() {
+        let _operation = self.update_operation.try_lock().map_err(|_| {
+            AdminServiceError::InvalidCredential(
+                "另一项在线更新操作正在执行，完成前不能修改更新配置".to_string(),
+            )
+        })?;
+        let SetUpdateConfigRequest {
+            update_mode,
+            source_repo_path,
+            source_branch,
+            source_upstream_git_url,
+            source_build_path,
+            github_token,
+            auto_apply,
+            auto_apply_time,
+        } = req;
+
+        let normalized_time = match auto_apply_time.as_deref() {
             Some(value) => Some(normalize_auto_apply_time(value)?),
             None => None,
         };
+        let normalize_optional = |value: Option<String>| {
+            value.map(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        };
 
-        // GitHub Token：空字符串表示清除，None 表示保持原值
-        let token_update: Option<Option<String>> = req.github_token.as_ref().map(|raw| {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-
-        {
-            let mut runtime = self.update_config.lock();
-            if let Some(auto_apply) = req.auto_apply {
-                runtime.auto_apply = auto_apply;
-            }
-            if let Some(time) = &normalized_time {
-                runtime.auto_apply_time = time.clone();
-            }
-            if let Some(token) = &token_update {
-                runtime.github_token = token.clone();
-            }
+        let mut runtime = self.update_config.lock();
+        let mut next = runtime.clone();
+        if let Some(mode) = update_mode {
+            next.mode = mode;
+        }
+        if let Some(value) = normalize_optional(source_repo_path) {
+            next.source_repo_path = value;
+        }
+        if let Some(value) = normalize_optional(source_branch) {
+            next.source_branch = value;
+        }
+        if let Some(value) = normalize_optional(source_upstream_git_url) {
+            next.source_upstream_git_url = value;
+        }
+        if let Some(value) = normalize_optional(source_build_path) {
+            next.source_build_path = value;
+        }
+        if let Some(value) = normalize_optional(github_token) {
+            next.github_token = value;
+        }
+        if let Some(value) = auto_apply {
+            next.auto_apply = value;
+        }
+        if let Some(value) = normalized_time {
+            next.auto_apply_time = value;
         }
 
-        self.update_config_file(move |c| {
-            if let Some(auto_apply) = req.auto_apply {
-                c.update_auto_apply = auto_apply;
-            }
-            if let Some(time) = normalized_time {
-                c.update_auto_apply_time = time;
-            }
-            if let Some(token) = token_update {
-                c.github_token = token;
-            }
-        });
+        if next.mode == UpdateMode::Source {
+            next.source_config()?;
+        }
 
-        Ok(self.get_update_config())
+        let persisted = next.clone();
+        self.token_manager
+            .update_config_file(move |config| {
+                config.update_mode = persisted.mode;
+                config.source_repo_path = persisted.source_repo_path;
+                config.source_branch = persisted.source_branch;
+                config.source_upstream_git_url = persisted.source_upstream_git_url;
+                config.source_build_path = persisted.source_build_path;
+                config.github_token = persisted.github_token;
+                config.update_auto_apply = persisted.auto_apply;
+                config.update_auto_apply_time = persisted.auto_apply_time;
+            })
+            .map_err(|error| {
+                AdminServiceError::InternalError(format!("保存在线更新配置失败: {}", error))
+            })?;
+
+        let response = next.response();
+        *runtime = next;
+        Ok(response)
     }
 
-    /// 下载新版二进制并通过校验和验证（对应前端「拉取镜像」按钮）。
-    /// 不替换当前可执行文件，便于用户在正式应用前先确认下载成功。
-    /// 下载产物保存到 `<exe>.staged-<version>`，下次 apply 命中同版本时复用。
+    /// 准备目标版本但不替换当前进程。binary 下载并校验官方二进制；source
+    /// 则在 detached 临时 worktree 合并 Release tag，并完成前端与 Rust 全量构建。
     pub async fn pull_update_image(&self) -> Result<ImageUpdateResponse, AdminServiceError> {
-        let (proxy, token) = {
-            let runtime = self.update_config.lock();
-            (
-                self.token_manager.proxy().map(|p| p.url.clone()),
-                runtime.github_token.clone(),
+        let _operation = self.update_operation.try_lock().map_err(|_| {
+            AdminServiceError::InvalidCredential(
+                "另一项在线更新操作正在执行，请等待其完成".to_string(),
             )
-        };
+        })?;
+        let runtime = self.update_config.lock().clone();
+        let mode = runtime.mode;
+        let proxy = self.token_manager.proxy().map(|p| p.url.clone());
         let exe = super::binary_update::current_executable()?;
-
         let version = self.resolve_target_version(false).await?;
-        let staged = staged_binary_path(&exe, &version);
+        let staged = staged_binary_path(&exe, &version, mode);
 
-        // 已经下载过同版本时直接复用，避免重复网络请求
-        let reused = staged.exists();
-        if !reused {
-            super::binary_update::download_release_binary(
-                &version,
-                proxy.as_deref(),
-                token.as_deref(),
-                &staged,
-            )
-            .await?;
-        }
-        // 清理其它版本的旧 staged 文件，避免占用磁盘
-        cleanup_other_staged(&exe, &version);
+        let (message, output) = match mode {
+            UpdateMode::Binary => {
+                let reused = staged.exists();
+                if !reused {
+                    super::binary_update::download_release_binary(
+                        &version,
+                        proxy.as_deref(),
+                        runtime.github_token.as_deref(),
+                        &staged,
+                    )
+                    .await?;
+                }
+                (
+                    if reused {
+                        format!("v{} 已下载并校验，可直接执行更新", version)
+                    } else {
+                        format!("已下载并校验 v{} 二进制，可直接执行更新", version)
+                    },
+                    format!(
+                        "mode: binary\n{}: v{}\nstaged: {}",
+                        if reused { "reused" } else { "downloaded" },
+                        version,
+                        staged.display()
+                    ),
+                )
+            }
+            UpdateMode::Source => {
+                let source_config = runtime.source_config()?;
+                let prepared = super::source_update::prepare_release(
+                    &source_config,
+                    &version,
+                    &staged,
+                )
+                .await?;
+                (
+                    if prepared.reused {
+                        format!("已复用 v{} 的源码合并与构建产物，可安全应用", version)
+                    } else {
+                        format!("已合并 v{} 源码并通过前端构建、check、test 和 release build", version)
+                    },
+                    format!(
+                        "mode: source\ntag: {}\nbase: {}\nmerged: {}\nstaged: {}\n{}",
+                        prepared.tag,
+                        prepared.base_head,
+                        prepared.merged_commit,
+                        staged.display(),
+                        prepared.output
+                    ),
+                )
+            }
+        };
+        cleanup_other_staged(&exe, Some(&staged));
 
         Ok(ImageUpdateResponse {
             success: true,
-            message: if reused {
-                format!("v{} 已下载并校验，可直接执行「更新并重启」", version)
-            } else {
-                format!("已下载并校验 v{} 二进制，可直接执行「更新并重启」", version)
-            },
-            output: Some(format!(
-                "{}: v{}\nstaged: {}",
-                if reused { "reused" } else { "downloaded" },
-                version,
-                staged.display()
-            )),
+            message,
+            output: Some(output),
             applied: false,
             need_restart: false,
         })
     }
 
-    /// 下载新版二进制并替换当前可执行文件，随后让进程退出由
-    /// `restart: unless-stopped` 接管重启（对应前端「更新并重启」按钮）。
-    /// 若 pull 已经把目标版本下载到 `<exe>.staged-<version>`，跳过重复下载。
+    /// 准备并应用目标版本。source 模式在安装二进制前执行二次 clean/branch/HEAD
+    /// CAS 校验，并仅通过 `git merge --ff-only` 推进主分支。
     pub async fn apply_image_update(&self) -> Result<ImageUpdateResponse, AdminServiceError> {
-        let (proxy, token) = {
-            let runtime = self.update_config.lock();
-            (
-                self.token_manager.proxy().map(|p| p.url.clone()),
-                runtime.github_token.clone(),
+        let _operation = self.update_operation.try_lock().map_err(|_| {
+            AdminServiceError::InvalidCredential(
+                "另一项在线更新操作正在执行，请等待其完成".to_string(),
             )
-        };
+        })?;
+        let runtime = self.update_config.lock().clone();
+        let mode = runtime.mode;
+        let proxy = self.token_manager.proxy().map(|p| p.url.clone());
         let exe = super::binary_update::current_executable()?;
-
         let version = self.resolve_target_version(true).await?;
-        let staged = staged_binary_path(&exe, &version);
+        let staged = staged_binary_path(&exe, &version, mode);
 
-        let reused = staged.exists();
-        if !reused {
-            super::binary_update::download_release_binary(
-                &version,
-                proxy.as_deref(),
-                token.as_deref(),
-                &staged,
-            )
-            .await?;
-        }
-        cleanup_other_staged(&exe, &version);
+        let mut binary_reused = false;
+        let source_prepared = match mode {
+            UpdateMode::Binary => {
+                binary_reused = staged.exists();
+                if !binary_reused {
+                    super::binary_update::download_release_binary(
+                        &version,
+                        proxy.as_deref(),
+                        runtime.github_token.as_deref(),
+                        &staged,
+                    )
+                    .await?;
+                }
+                None
+            }
+            UpdateMode::Source => {
+                let source_config = runtime.source_config()?;
+                let prepared = super::source_update::prepare_release(
+                    &source_config,
+                    &version,
+                    &staged,
+                )
+                .await?;
+                super::source_update::promote_prepared(
+                    &source_config,
+                    &prepared,
+                    &staged,
+                )
+                .await?;
+                Some((source_config, prepared))
+            }
+        };
+        cleanup_other_staged(&exe, Some(&staged));
 
-        // 记录当前版本作为「上一版本」，供前端展示「回退」按钮
         let previous_version = env!("CARGO_PKG_VERSION").to_string();
         super::binary_update::install_binary(&exe, &staged)?;
 
         let prev_label = format!("v{}", previous_version);
         let applied_at = chrono::Utc::now().to_rfc3339();
-        {
-            let mut runtime = self.update_config.lock();
-            runtime.previous_version = Some(prev_label.clone());
-            runtime.last_applied_at = Some(applied_at.clone());
-        }
+        let source_metadata = source_prepared.as_ref().map(|(_, prepared)| {
+            (
+                prepared.tag.clone(),
+                prepared.merged_commit.clone(),
+                prepared.base_head.clone(),
+            )
+        });
         let prev_to_persist = prev_label.clone();
         let applied_at_to_persist = applied_at.clone();
-        self.update_config_file(move |c| {
-            c.update_previous_version = Some(prev_to_persist);
-            c.update_last_applied_at = Some(applied_at_to_persist);
-        });
+        let persist_result = {
+            // 与 set_update_config 共用 update_config 锁，保证“读取最新状态 →
+            // 持久化审计 → 更新运行时”不会被并发 partial patch 覆盖。
+            let mut runtime = self.update_config.lock();
+            let result = self.token_manager.update_config_file(move |config| {
+                config.update_previous_version = Some(prev_to_persist);
+                config.update_last_applied_at = Some(applied_at_to_persist);
+                if let Some((tag, commit, previous_head)) = source_metadata {
+                    config.source_last_merged_tag = Some(tag);
+                    config.source_last_merged_commit = Some(commit);
+                    config.source_previous_head = Some(previous_head);
+                }
+            });
+            if result.is_ok() {
+                runtime.previous_version = Some(prev_label.clone());
+                runtime.last_applied_at = Some(applied_at.clone());
+                if let Some((_, prepared)) = &source_prepared {
+                    runtime.source_last_merged_tag = Some(prepared.tag.clone());
+                    runtime.source_last_merged_commit = Some(prepared.merged_commit.clone());
+                    runtime.source_previous_head = Some(prepared.base_head.clone());
+                }
+            }
+            result
+        };
+        if let Err(error) = persist_result {
+            let rollback = super::binary_update::restore_backup(&exe);
+            if let Some((source_config, prepared)) = &source_prepared {
+                super::source_update::finalize_prepared(source_config, prepared, &staged).await;
+            }
+            return Err(AdminServiceError::InternalError(match rollback {
+                Ok(()) => format!(
+                    "保存更新元数据失败，已恢复旧二进制（源码分支若已推进则保持不回退）: {}",
+                    error
+                ),
+                Err(rollback_error) => format!(
+                    "保存更新元数据失败，且恢复旧二进制失败: {}; {}",
+                    error, rollback_error
+                ),
+            }));
+        }
+
+        if let Some((source_config, prepared)) = &source_prepared {
+            super::source_update::finalize_prepared(source_config, prepared, &staged).await;
+        }
 
         super::binary_update::schedule_self_exit(std::time::Duration::from_secs(2));
 
+        let (message, output) = if let Some((_, prepared)) = source_prepared {
+            (
+                format!(
+                    "已将 {} 合并到本地分支、安装构建产物；进程将在 2 秒后退出并由进程守护器重启",
+                    prepared.tag
+                ),
+                format!(
+                    "mode: source\nprevious binary: v{}\nbase: {}\nmerged: {}\nreused build: {}",
+                    previous_version,
+                    prepared.base_head,
+                    prepared.merged_commit,
+                    prepared.reused
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "已替换为 v{}；进程将在 2 秒后退出并由进程守护器重启",
+                    version
+                ),
+                format!(
+                    "mode: binary\nprevious: v{}\n{}: v{}",
+                    previous_version,
+                    if binary_reused { "reused-staged" } else { "installed" },
+                    version
+                ),
+            )
+        };
+
         Ok(ImageUpdateResponse {
             success: true,
-            message: format!(
-                "已替换为 v{}，进程将在 2 秒后退出，由容器重启策略接管",
-                version
-            ),
-            output: Some(format!(
-                "previous: v{}\n{}: v{}",
-                previous_version,
-                if reused { "reused-staged" } else { "installed" },
-                version
-            )),
+            message,
+            output: Some(output),
             applied: true,
             need_restart: true,
         })
     }
 
     /// 把可执行文件回退到 `<exe>.backup`，再重启进程。
+    /// source 模式只回退运行二进制，不对已经 fast-forward 的源码分支执行 reset。
     pub async fn rollback_image_update(&self) -> Result<ImageUpdateResponse, AdminServiceError> {
-        let previous_label = self
-            .update_config
-            .lock()
+        let _operation = self.update_operation.try_lock().map_err(|_| {
+            AdminServiceError::InvalidCredential(
+                "另一项在线更新操作正在执行，请等待其完成".to_string(),
+            )
+        })?;
+        let runtime_snapshot = self.update_config.lock().clone();
+        let previous_label = runtime_snapshot
             .previous_version
             .as_deref()
             .map(str::trim)
@@ -1673,30 +1902,60 @@ impl AdminService {
             .to_string();
 
         let exe = super::binary_update::current_executable()?;
-        super::binary_update::restore_backup(&exe)?;
-        // 回退后清掉所有 staged：用户已表态"上一次更新是错的"，残留只会误导
-        cleanup_other_staged(&exe, "");
 
-        // 回退视为撤销最近一次更新：清空 previous_version 和 last_applied_at
+        // 必须在切换二进制和退出前持久化关闭自动应用。否则 launchd 拉起旧
+        // 二进制后，错过时间补跑会在 30 秒内重新安装刚回退的版本。此阶段
+        // 只关闭开关，保留 previous 元数据，确保 restore 失败后仍可重试。
         {
             let mut runtime = self.update_config.lock();
-            runtime.previous_version = None;
-            runtime.last_applied_at = None;
+            self.token_manager
+                .update_config_file(|config| {
+                    config.update_auto_apply = false;
+                })
+                .map_err(|error| {
+                    AdminServiceError::InternalError(format!(
+                        "回退前关闭自动更新并保存配置失败: {}",
+                        error
+                    ))
+                })?;
+            runtime.auto_apply = false;
         }
-        self.update_config_file(|c| {
-            c.update_previous_version = None;
-            c.update_last_applied_at = None;
-        });
+
+        super::binary_update::restore_backup(&exe)?;
+        cleanup_other_staged(&exe, None);
+
+        // 二进制恢复成功后再清除回退元数据；清理失败不反转已完成的回退，
+        // 且 autoApply 已持久化为 false，不会被调度器重新升级。
+        {
+            let mut runtime = self.update_config.lock();
+            if let Err(error) = self.token_manager.update_config_file(|config| {
+                config.update_previous_version = None;
+                config.update_last_applied_at = None;
+            }) {
+                tracing::warn!(error = %error, "回退成功，但清理更新元数据失败");
+            } else {
+                runtime.previous_version = None;
+                runtime.last_applied_at = None;
+            }
+        }
 
         super::binary_update::schedule_self_exit(std::time::Duration::from_secs(2));
 
+        let source_note = if runtime_snapshot.mode == UpdateMode::Source {
+            "；源码分支保持当前提交，不执行 reset"
+        } else {
+            ""
+        };
         Ok(ImageUpdateResponse {
             success: true,
             message: format!(
-                "已回退到 {}，进程将在 2 秒后退出，由容器重启策略接管",
-                previous_label
+                "已回退运行二进制到 {}{}；自动更新已关闭，进程将在 2 秒后退出并由进程守护器重启",
+                previous_label, source_note
             ),
-            output: Some(format!("rolled back to: {}", previous_label)),
+            output: Some(format!(
+                "rolled back binary to: {}\nsource history changed: false\nauto apply: disabled",
+                previous_label
+            )),
             applied: true,
             need_restart: true,
         })
@@ -1744,6 +2003,7 @@ impl AdminService {
                 if age < UPDATE_CHECK_TTL_SECS {
                     let mut info = cached.info.clone();
                     info.cached = true;
+                    info.build_type = self.update_config.lock().mode.as_str().to_string();
                     return info;
                 }
             }
@@ -1762,6 +2022,7 @@ impl AdminService {
                 if let Some(cached) = self.update_check_cache.lock().clone() {
                     let mut info = cached.info.clone();
                     info.cached = true;
+                    info.build_type = self.update_config.lock().mode.as_str().to_string();
                     info.warning = Some(warning);
                     return info;
                 }
@@ -1769,7 +2030,7 @@ impl AdminService {
                     current_version: env!("CARGO_PKG_VERSION").to_string(),
                     latest_version: String::new(),
                     has_update: false,
-                    build_type: BUILD_TYPE.to_string(),
+                    build_type: self.update_config.lock().mode.as_str().to_string(),
                     release_name: None,
                     release_notes: None,
                     release_url: None,
@@ -1827,7 +2088,7 @@ impl AdminService {
             current_version: current,
             latest_version,
             has_update,
-            build_type: BUILD_TYPE.to_string(),
+            build_type: self.update_config.lock().mode.as_str().to_string(),
             release_name: Some(release.name).filter(|v| !v.is_empty()),
             release_notes: Some(release.body).filter(|v| !v.is_empty()),
             release_url: Some(release.html_url).filter(|v| !v.is_empty()),
@@ -2219,6 +2480,72 @@ impl AdminService {
         }
 
         Ok(self.get_log_governance_config())
+    }
+
+    /// 读取费用单价配置
+    pub fn get_pricing_config(&self) -> PricingConfigResponse {
+        let (credit_unit_price, currency) = self.pricing.lock().clone();
+        PricingConfigResponse {
+            credit_unit_price,
+            currency,
+        }
+    }
+
+    /// 更新费用单价配置并持久化到 config.json
+    ///
+    /// 单价仅用于报表把 credits 折算成金额，不影响任何计费或请求行为。
+    pub fn set_pricing_config(
+        &self,
+        req: SetPricingConfigRequest,
+    ) -> Result<PricingConfigResponse, AdminServiceError> {
+        if req.credit_unit_price.is_none() && req.currency.is_none() {
+            return Err(AdminServiceError::InvalidCredential(
+                "至少提供 creditUnitPrice / currency 一个字段".to_string(),
+            ));
+        }
+
+        if let Some(price) = req.credit_unit_price {
+            if !price.is_finite() || price < 0.0 {
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "creditUnitPrice 必须为 >= 0 的有限数: {}",
+                    price
+                )));
+            }
+        }
+
+        let currency = match &req.currency {
+            Some(c) => {
+                let trimmed = c.trim();
+                if trimmed.len() != 3 || !trimmed.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                    return Err(AdminServiceError::InvalidCredential(
+                        "currency 必须是 3 位 ASCII 字母货币代码（例如 USD、CNY）".to_string(),
+                    ));
+                }
+                Some(trimmed.to_uppercase())
+            }
+            None => None,
+        };
+
+        let mut pricing = self.pricing.lock();
+        let next_price = req.credit_unit_price.unwrap_or(pricing.0);
+        let next_currency = currency.unwrap_or_else(|| pricing.1.clone());
+
+        // 在同一把锁内完成合并、持久化和运行时更新，避免并发部分更新互相覆盖。
+        // 先持久化，只有磁盘写入成功后才更新运行时值，避免接口返回成功但重启丢失。
+        self.token_manager
+            .update_config_file(|config| {
+                config.credit_unit_price = next_price;
+                config.currency = next_currency.clone();
+            })
+            .map_err(|e| {
+                AdminServiceError::InternalError(format!("持久化费用单价失败: {}", e))
+            })?;
+
+        *pricing = (next_price, next_currency.clone());
+        Ok(PricingConfigResponse {
+            credit_unit_price: next_price,
+            currency: next_currency,
+        })
     }
 
     fn persist_log_governance_config(
