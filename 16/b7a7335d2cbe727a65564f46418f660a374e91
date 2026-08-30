@@ -1,0 +1,53 @@
+admin-ui/src/App.tsx
+  s_9d5309dc6bdc08::t_f5ecf135387553 67-74
+  s_9d5309dc6bdc08::t_cfd5e0a13d38f8 15
+  s_9d5309dc6bdc08::t_9e3ca4b94517ce 449
+admin-ui/src/hooks/use-stats.ts
+  s_9d5309dc6bdc08::t_fd18a861f9ef96 2-9
+  s_9d5309dc6bdc08::t_06ba400fd9a2c8 14
+  s_9d5309dc6bdc08::t_dc064074f83b4c 65,70-78
+admin-ui/src/components/topbar-tools.tsx
+  s_9d5309dc6bdc08::t_851f8de8dbb32b 298-300
+  s_9d5309dc6bdc08::t_de0c71dc8a1a3c 271,273
+admin-ui/src/components/image-update-dialog.tsx
+  s_7d2ce0abf2c273::t_79f57fed056f5d 810-812
+  s_9d5309dc6bdc08::t_fd91f7dd89bedb 285
+  s_7d2ce0abf2c273::t_7beff276d09f5b 268-278,295
+  s_7d2ce0abf2c273::t_a993a23c0e928a 69-101
+src/anthropic/handlers.rs
+  s_7d2ce0abf2c273::t_c15b900e212156 105-108
+src/admin/router.rs
+  s_9d5309dc6bdc08::t_8bee765a9b28d2 31-32
+admin-ui/src/api/stats.ts
+  s_9d5309dc6bdc08::t_fb29e2d63bb5ea 71-73
+src/admin/usage_stats.rs
+  s_7d2ce0abf2c273::t_73f879e3bdb3b5 281-295,297-309,312
+  s_7d2ce0abf2c273::t_eda36cbb29d99d 888-917
+  s_7d2ce0abf2c273::t_b80ce810c347d6 927
+admin-ui/src/components/overview-page.tsx
+  s_9d5309dc6bdc08::t_ca38f1aad369c0 192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "16b7a7335d2cbe727a65564f46418f660a374e91",
+  "prompts": {},
+  "sessions": {
+    "s_7d2ce0abf2c273": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_deac981c-6b2d-4798-96b9-c3843099b396",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    },
+    "s_9d5309dc6bdc08": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_ead04981-95a4-4051-bd29-2c8ddf486087",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    }
+  }
+}
