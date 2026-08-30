@@ -1,16 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
-import { getByCredential, getByKey, getByModel, getOverview, getTimeSeries } from '@/api/stats'
+import {
+  getByCredential,
+  getByKey,
+  getByModel,
+  getOverview,
+  getOverviewByKey,
+  getTimeSeries,
+} from '@/api/stats'
 import type { StatsFilter, StatsTimeFilter } from '@/types/api'
 
 /**
- * 统计接口共用配置
- *
- * - `staleTime: 25_000`：30s 自动刷新前不再触发后台 refetch（防止跨 Tab 切换抖动）
- * - 不保留上一筛选条件的数据，避免时间 / Key / 账号组标签与旧数据错配
- * - `refetchOnWindowFocus: false`：Admin 面板长时间挂着时减少瞬时压力
+ * 统计刷新由页面级自动刷新控件统一调度。
+ * 不保留上一筛选的数据，避免时间、Key 或账号组标签与旧结果错配。
  */
 const COMMON = {
-  refetchInterval: 30_000,
   staleTime: 25_000,
   refetchOnWindowFocus: false,
 } as const
@@ -56,10 +59,20 @@ export function useByCredential(time: StatsTimeFilter, filter?: StatsFilter) {
   })
 }
 
+/** Usage Report：keyId/group 都参与请求和缓存键。 */
 export function useByKey(time: StatsTimeFilter, filter?: StatsFilter) {
   return useQuery({
-    queryKey: ['stats', 'by-key', ...timeKey(time), filter?.keyId ?? 'all', filter?.group ?? 'all'],
+    queryKey: ['stats', 'report-by-key', ...timeKey(time), filter?.keyId ?? 'all', filter?.group ?? 'all'],
     queryFn: () => getByKey(time, filter),
+    ...COMMON,
+  })
+}
+
+/** Overview KeyPanel：横向比较全部 Key，刻意忽略 keyId，使用独立缓存空间。 */
+export function useOverviewByKey(time: StatsTimeFilter, filter?: StatsFilter) {
+  return useQuery({
+    queryKey: ['stats', 'overview-by-key', ...timeKey(time), filter?.group ?? 'all'],
+    queryFn: () => getOverviewByKey(time, filter),
     ...COMMON,
   })
 }

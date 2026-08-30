@@ -493,6 +493,17 @@ impl KiroProvider {
                         Some(&e.to_string()),
                         attempt_start,
                     );
+                    // 凭据专属代理故障时，跳过该凭据换下一个。
+                    let has_own_proxy = ctx
+                        .credentials
+                        .proxy_url
+                        .as_deref()
+                        .is_some_and(|u| !u.trim().is_empty());
+                    if has_own_proxy {
+                        tracing::warn!("凭据 #{} 有专属代理且 MCP 请求失败，跳过该凭据", ctx.id);
+                        self.token_manager
+                            .report_failure_for_request(ctx.id, None, group);
+                    }
                     last_error = Some(e.into());
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -815,8 +826,19 @@ impl KiroProvider {
                         sink, attempt, ctx.id, endpoint_name, None,
                         outcome::NETWORK_ERROR, Some(&e.to_string()), attempt_start,
                     );
-                    // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
-                    // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
+                    // 凭据专属代理故障时，重试同一凭据无意义，应跳过该凭据换下一个。
+                    // 没有专属代理时（直连或仅全局代理），切换凭据不解决问题，保持重试。
+                    let has_own_proxy = ctx.credentials.proxy_url.as_deref()
+                        .map_or(false, |u| !u.trim().is_empty());
+                    if has_own_proxy {
+                        tracing::warn!(
+                            "凭据 #{} 有专属代理且网络请求失败，跳过该凭据",
+                            ctx.id
+                        );
+                        self.token_manager
+                            .report_failure_for_request(ctx.id, model.as_deref(), group);
+                    }
+
                     last_error = Some(e.into());
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;

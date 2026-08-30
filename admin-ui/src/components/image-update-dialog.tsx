@@ -66,6 +66,39 @@ function formatDateTime(value: string): string {
   return new Date(t).toLocaleString()
 }
 
+/**
+ * 提取更新接口的完整错误文本，供“最近输出 / 错误详情”展示。
+ * 不序列化整个 AxiosError，避免把请求配置或 x-api-key 带入页面。
+ */
+function extractUpdateErrorOutput(error: unknown): string {
+  if (typeof error === 'string') {
+    return error.trim() || '未知错误'
+  }
+  if (!error || typeof error !== 'object') {
+    return '未知错误'
+  }
+
+  const errorRecord = error as Record<string, unknown>
+  const response = errorRecord.response as Record<string, unknown> | undefined
+  const data = response?.data
+  if (data && typeof data === 'object') {
+    const backendError = (data as Record<string, unknown>).error
+    if (backendError && typeof backendError === 'object') {
+      const message = (backendError as Record<string, unknown>).message
+      if (typeof message === 'string' && message.trim()) {
+        return message
+      }
+    }
+  }
+  if (typeof data === 'string' && data.trim()) {
+    return data
+  }
+  if (typeof errorRecord.message === 'string' && errorRecord.message.trim()) {
+    return errorRecord.message
+  }
+  return '未知错误'
+}
+
 export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps) {
   const queryClient = useQueryClient()
   const [autoApplyTime, setAutoApplyTime] = useState('03:00')
@@ -232,13 +265,24 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
     onError: (err) => toast.error(`验证失败: ${extractErrorMessage(err)}`),
   })
 
+  const handleUpdateError = (prefix: string, error: unknown) => {
+    const output = extractUpdateErrorOutput(error)
+    const parsedTitle = extractErrorMessage(error)
+    const titleSource =
+      parsedTitle === '未知错误' && output !== '未知错误' ? output : parsedTitle
+    const title = titleSource.split(/\r?\n/, 1)[0].trim() || '未知错误'
+
+    setLastOutput(output)
+    toast.error(`${prefix}: ${title}`)
+  }
+
   const pullMutation = useMutation({
     mutationFn: (mode: UpdateMode) => pullUpdateImage(mode),
     onSuccess: (res) => {
       setLastOutput(res.output || res.message)
       toast.success(res.message)
     },
-    onError: (err) => toast.error(`准备失败: ${extractErrorMessage(err)}`),
+    onError: (err) => handleUpdateError('准备失败', err),
   })
 
   const applyMutation = useMutation({
@@ -248,7 +292,7 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
       toast.success(res.message)
       queryClient.invalidateQueries({ queryKey: ['update-config'] })
     },
-    onError: (err) => toast.error(`更新失败: ${extractErrorMessage(err)}`),
+    onError: (err) => handleUpdateError('更新失败', err),
   })
 
   const rollbackMutation = useMutation({
@@ -763,7 +807,9 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
 
           {lastOutput && (
             <div className="rounded-md border bg-muted/40 p-3">
-              <div className="mb-2 text-xs font-medium text-muted-foreground">最近输出</div>
+              <div className="mb-2 text-xs font-medium text-muted-foreground">
+                最近输出 / 错误详情
+              </div>
               <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">
                 {lastOutput}
               </pre>

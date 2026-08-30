@@ -56,9 +56,18 @@ export async function getByCredential(time: StatsTimeFilter, filter?: StatsFilte
   return data
 }
 
+/** 报表查询：尊重 keyId 与 group，保证所有报表分布使用同一筛选口径。 */
 export async function getByKey(time: StatsTimeFilter, filter?: StatsFilter): Promise<KeyDistribution[]> {
   const { data } = await api.get<KeyDistribution[]>('/stats/by-key', {
     params: statsParams(time, filter),
+  })
+  return data
+}
+
+/** Overview 横向比较：忽略 keyId，但继续透传 group。 */
+export async function getOverviewByKey(time: StatsTimeFilter, filter?: StatsFilter): Promise<KeyDistribution[]> {
+  const { data } = await api.get<KeyDistribution[]>('/stats/by-key', {
+    params: { ...time, ...(filter?.group ? { group: filter.group } : {}) },
   })
   return data
 }

@@ -278,15 +278,38 @@ pub struct StatsQueryWindow {
 
 impl StatsQueryWindow {
     pub fn preset(range: Range, granularity: StatsGranularity) -> Self {
-        let now = Utc::now().timestamp();
-        let start_ts = match range {
-            Range::Last24h => now - 24 * 3600,
-            Range::Last7d => now - 7 * 24 * 3600,
-            Range::Last30d => now - 30 * 24 * 3600,
+        let now = Utc::now();
+        let seconds = match range {
+            Range::Last24h => 24 * 3600,
+            Range::Last7d => 7 * 24 * 3600,
+            Range::Last30d => 30 * 24 * 3600,
         };
+        let rolling_start = now - Duration::seconds(seconds);
+        let local_start = rolling_start.with_timezone(&Local);
+
+        // 聚合器只保留整小时/整日桶，无法从边缘桶中剔除窗口外的单条记录。
+        // 将预设起点向下对齐并纳入完整首桶，避免静默漏掉仍与 rolling window
+        // 重叠的记录；自定义日期范围本身已对齐到本地午夜，不受影响。
+        let start_hour = match granularity {
+            StatsGranularity::Hour => local_start.hour(),
+            StatsGranularity::Day => 0,
+        };
+        let start_ts = Local
+            .with_ymd_and_hms(
+                local_start.year(),
+                local_start.month(),
+                local_start.day(),
+                start_hour,
+                0,
+                0,
+            )
+            .earliest()
+            .map(|start| start.timestamp())
+            .unwrap_or_else(|| rolling_start.timestamp());
+
         Self {
             start_ts,
-            end_ts: now,
+            end_ts: now.timestamp(),
             granularity,
         }
     }
@@ -861,6 +884,50 @@ mod tests {
         let by_cred = agg.query_by_credential(window, None, None);
         assert_eq!(by_cred.len(), 1);
         assert_eq!(by_cred[0].credential_id, 5);
+
+        let by_key = agg.query_by_key(window, None, None);
+        assert_eq!(by_key.len(), 1);
+        assert_eq!(by_key[0].key_id, 1);
+        assert_eq!(by_key[0].calls, 2);
+        assert_eq!(by_key[0].input_tokens, 2000);
+    }
+
+    #[test]
+    fn query_by_key_ranks_multiple_keys() {
+        let agg = UsageAggregator::new();
+        let now = Utc::now().to_rfc3339();
+        let mk = |key_id: u64, cred: u64, input: u64| UsageRecord {
+            ts: now.clone(),
+            key_id,
+            credential_id: cred,
+            model: "m".to_string(),
+            input_tokens: input,
+            output_tokens: 10,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            credits: 0.01,
+            duration_ms: 100,
+            status: "success".to_string(),
+        };
+        agg.ingest(&mk(1, 5, 100));
+        agg.ingest(&mk(2, 6, 300));
+        agg.ingest(&mk(2, 6, 300));
+
+        let window = StatsQueryWindow::preset(Range::Last24h, StatsGranularity::Hour);
+        let by_key = agg.query_by_key(window, None, None);
+        assert_eq!(by_key.len(), 2);
+        // key 2 调用更多 → 排在前面
+        assert_eq!(by_key[0].key_id, 2);
+        assert_eq!(by_key[0].calls, 2);
+        assert_eq!(by_key[0].input_tokens, 600);
+        assert_eq!(by_key[1].key_id, 1);
+
+        // 分组白名单只放行凭据 5 → 仅 key 1 命中
+        let allow: std::collections::HashSet<u64> = [5u64].into_iter().collect();
+        let filtered = agg.query_by_key(window, None, Some(&allow));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].key_id, 1);
+        assert_eq!(filtered[0].input_tokens, 100);
     }
 
     #[test]

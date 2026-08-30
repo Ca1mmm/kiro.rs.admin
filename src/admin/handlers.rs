@@ -22,7 +22,8 @@ use super::{
         AddCredentialRequest, AddProxyRequest, AssignProxyRequest, AssignRoundRobinRequest,
         BatchAddProxyRequest, BatchImportEvent, BatchImportRequest, BatchImportSummary,
         ClientKeyItem, ClientKeysResponse, CompleteSocialLoginRequest, CreateClientKeyRequest,
-        CreateClientKeyResponse, GlobalProxyResponse, ModelTestRequest,
+        CreateClientKeyResponse, ModelTestRequest,
+        CredentialMetadataSchemaConfig,
         SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetDisabledRequest,
         SetGlobalProxyRequest,
         SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetPricingConfigRequest, SetPriorityRequest,
@@ -30,6 +31,7 @@ use super::{
         SetUpdateConfigRequest, StartIdcLoginRequest, StartSocialLoginRequest, SuccessResponse,
         UpdateAdminKeyRequest, UpdateClientKeyRequest, UpdateCredentialRequest,
         UpdateRefreshTokenRequest,
+        SetCustomModelsRequest,
     },
     usage_stats::{Range, StatsGranularity, StatsQueryWindow},
 };
@@ -42,6 +44,24 @@ type CredSessionPath = (u64, String);
 pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoResponse {
     let response = state.service.get_all_credentials();
     Json(response)
+}
+
+/// GET /api/admin/config/credential-metadata-schema
+pub async fn get_credential_metadata_schema(
+    State(state): State<AdminState>,
+) -> impl IntoResponse {
+    Json(state.service.get_credential_metadata_schema())
+}
+
+/// PUT /api/admin/config/credential-metadata-schema
+pub async fn set_credential_metadata_schema(
+    State(state): State<AdminState>,
+    Json(payload): Json<CredentialMetadataSchemaConfig>,
+) -> impl IntoResponse {
+    match state.service.set_credential_metadata_schema(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (error.status_code(), Json(error.into_response())).into_response(),
+    }
 }
 
 /// GET /api/admin/credentials/export
@@ -713,9 +733,7 @@ pub async fn complete_social_login(
 /// GET /api/admin/config/global-proxy
 /// 获取当前全局代理配置
 pub async fn get_global_proxy(State(state): State<AdminState>) -> impl IntoResponse {
-    Json(GlobalProxyResponse {
-        proxy_url: state.service.get_global_proxy(),
-    })
+    Json(state.service.get_global_proxy())
 }
 
 /// PUT /api/admin/config/global-proxy
@@ -724,8 +742,29 @@ pub async fn set_global_proxy(
     State(state): State<AdminState>,
     Json(payload): Json<SetGlobalProxyRequest>,
 ) -> impl IntoResponse {
-    match state.service.set_global_proxy(payload.proxy_url) {
+    match state
+        .service
+        .set_global_proxy(payload.proxy_url, payload.proxy_username, payload.proxy_password)
+    {
         Ok(_) => Json(SuccessResponse::new("全局代理已更新")).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/config/custom-models
+/// 获取所有自定义模型配置
+pub async fn get_custom_models(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_custom_models())
+}
+
+/// PUT /api/admin/config/custom-models
+/// 批量替换自定义模型配置（运行时热更新 + 持久化 config.json）
+pub async fn set_custom_models(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetCustomModelsRequest>,
+) -> impl IntoResponse {
+    match state.service.set_custom_models(payload) {
+        Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
@@ -914,6 +953,8 @@ fn key_to_item(k: &super::client_keys::ClientKey) -> ClientKeyItem {
         total_output_tokens: k.total_output_tokens,
         total_cache_creation_tokens: k.total_cache_creation_tokens,
         total_cache_read_tokens: k.total_cache_read_tokens,
+        total_credits: k.total_credits,
+        max_credits: k.max_credits,
         group: k.group.clone(),
         is_system: k.is_system,
     }
@@ -945,6 +986,18 @@ pub async fn create_client_key(
         )
             .into_response();
     }
+    // 校验积分上限（若提供）：必须是非负有限值
+    if let Some(v) = payload.max_credits {
+        if !v.is_finite() || v < 0.0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(super::types::AdminErrorResponse::invalid_request(
+                    "maxCredits 必须是非负数",
+                )),
+            )
+                .into_response();
+        }
+    }
     let entry = state.client_keys.create(
         name.to_string(),
         payload
@@ -956,6 +1009,10 @@ pub async fn create_client_key(
             .map(|g| g.trim().to_string())
             .filter(|g| !g.is_empty()),
     );
+    // 创建后若指定了上限则应用
+    if let Some(v) = payload.max_credits {
+        state.client_keys.set_max_credits(entry.id, Some(v));
+    }
     Json(CreateClientKeyResponse {
         id: entry.id,
         key: entry.key,
@@ -963,6 +1020,43 @@ pub async fn create_client_key(
         created_at: entry.created_at,
     })
     .into_response()
+}
+
+/// POST /api/admin/client-keys/:id/max-credits
+/// 设置或清除单个 Key 的积分使用上限。body: { "maxCredits": <number|null> }
+pub async fn set_client_key_max_credits(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<super::types::SetClientKeyMaxCreditsRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    if let Some(v) = payload.max_credits {
+        if !v.is_finite() || v < 0.0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(super::types::AdminErrorResponse::invalid_request(
+                    "maxCredits 必须是非负数",
+                )),
+            )
+                .into_response();
+        }
+    }
+    if state.client_keys.set_max_credits(id, payload.max_credits) {
+        let msg = match payload.max_credits {
+            Some(v) => format!("Key #{} 积分上限已设为 {:.2}", id, v),
+            None => format!("Key #{} 已取消积分上限", id),
+        };
+        Json(SuccessResponse::new(msg)).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(super::types::AdminErrorResponse::not_found(format!(
+                "Key #{} 不存在",
+                id
+            ))),
+        )
+            .into_response()
+    }
 }
 
 /// DELETE /api/admin/client-keys/:id
@@ -1386,7 +1480,8 @@ pub async fn stats_by_key(
 
 /// GET /api/admin/traces
 /// 查询请求链路追踪记录（含每跳明细）。
-/// query 参数：status / errorType / credentialId / keyId / group / model / onlyFailed / limit / offset
+/// query 参数：status / errorType / credentialId / keyId / group / model / onlyFailed /
+///            startTime / endTime（Unix 秒）/ q（关键字）/ limit / offset
 /// 返回：{ records: [...], total: N }
 pub async fn list_traces(
     State(state): State<AdminState>,
@@ -1424,6 +1519,13 @@ pub async fn list_traces(
             .map(|s| s == "true" || s == "1")
             .unwrap_or(false),
         credential_ids,
+        // startTime / endTime 为 Unix 秒，与 traces.ts_epoch 同单位
+        start_ts: params.get("startTime").and_then(|s| s.parse::<i64>().ok()),
+        end_ts: params.get("endTime").and_then(|s| s.parse::<i64>().ok()),
+        keyword: params
+            .get("q")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         limit: params
             .get("limit")
             .and_then(|s| s.parse::<usize>().ok())
