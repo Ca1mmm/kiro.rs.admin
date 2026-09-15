@@ -24,6 +24,7 @@
 
 pub mod cache_metering;
 mod converter;
+pub(crate) use converter::map_model;
 mod handlers;
 mod middleware;
 mod openai;

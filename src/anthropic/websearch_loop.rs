@@ -403,6 +403,10 @@ async fn run_round(
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "message list is empty".to_string())
                 }
+                ConversionError::InvalidToolPairing(reason) => (
+                    "invalid_request_error",
+                    format!("invalid tool call sequence: {}", reason),
+                ),
                 ConversionError::UnsupportedToolMapping(reason) => (
                     "invalid_request_error",
                     format!("unsupported tool mapping: {}", reason),

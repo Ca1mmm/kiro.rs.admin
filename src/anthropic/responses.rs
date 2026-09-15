@@ -136,6 +136,11 @@ pub struct ResponsesRequest {
     pub reasoning: Option<ReasoningConfig>,
     #[serde(default)]
     pub prompt_cache_key: Option<String>,
+    /// Stateful Responses continuation is not available because this proxy does not
+    /// persist response transcripts. Reject it explicitly instead of silently losing
+    /// the tool call/message context referenced by the client.
+    #[serde(default)]
+    pub previous_response_id: Option<String>,
 }
 
 fn default_parallel_tool_calls() -> bool {
@@ -274,6 +279,13 @@ fn responses_to_anthropic(
     req: ResponsesRequest,
     metadata: Option<Metadata>,
 ) -> Result<(MessagesRequest, ToolKindMap), String> {
+    if req.previous_response_id.is_some() {
+        return Err(
+            "previous_response_id is not supported by this stateless endpoint; replay the complete input history"
+                .to_string(),
+        );
+    }
+
     let max_tokens = req
         .max_output_tokens
         .filter(|v| *v > 0)
@@ -315,6 +327,7 @@ fn responses_to_anthropic(
 
                 translate_input_item(item, &mut system, &mut merged)?;
             }
+            validate_tool_replay(items)?;
         }
         _ => {}
     }
@@ -599,6 +612,79 @@ fn convert_responses_tools(
     out
 }
 
+fn response_call_item_id(item: &Value) -> Option<String> {
+    item.get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn response_output_call_id(item: &Value) -> Option<String> {
+    item.get("call_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Validate the complete replay before converting it. Kiro requires tool calls and
+/// results to be non-empty, unique, ordered, and fully paired. In particular, do
+/// not let an orphaned current result become an unvalidated history result on the
+/// client's next retry.
+fn validate_tool_replay(items: &[Value]) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let mut seen_calls = HashSet::new();
+    let mut seen_outputs = HashSet::new();
+    let mut pending = HashSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+        match item_type {
+            "function_call" | "custom_tool_call" => {
+                let call_id = response_call_item_id(item).ok_or_else(|| {
+                    format!("input item {index} ({item_type}) must contain a non-empty call_id")
+                })?;
+                if !seen_calls.insert(call_id.clone()) {
+                    return Err(format!(
+                        "input item {index} duplicates tool call id {call_id}"
+                    ));
+                }
+                pending.insert(call_id);
+            }
+            "function_call_output" | "custom_tool_call_output" => {
+                let call_id = response_output_call_id(item).ok_or_else(|| {
+                    format!("input item {index} ({item_type}) must contain a non-empty call_id")
+                })?;
+                if !seen_outputs.insert(call_id.clone()) {
+                    return Err(format!(
+                        "input item {index} duplicates tool output for call_id {call_id}"
+                    ));
+                }
+                if !pending.remove(&call_id) {
+                    return Err(format!(
+                        "input item {index} contains an orphaned or out-of-order tool output for call_id {call_id}"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !pending.is_empty() {
+        let mut ids: Vec<_> = pending.into_iter().collect();
+        ids.sort();
+        return Err(format!(
+            "tool calls are missing outputs for call_id(s): {}",
+            ids.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
 /// 翻译单个 Responses input item 到 Anthropic 结构
 fn translate_input_item(
     item: &Value,
@@ -611,12 +697,8 @@ fn translate_input_item(
         // 助手发起的工具调用（function 类型）。namespace 工具还原为展平名，
         // 与进方向声明及模型产出保持一致。
         "function_call" => {
-            let call_id = item
-                .get("call_id")
-                .or_else(|| item.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let call_id = response_call_item_id(item)
+                .ok_or_else(|| format!("input {ty} must contain a non-empty call_id"))?;
             let name = item
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -642,12 +724,8 @@ fn translate_input_item(
         // 包装 schema 复原为 {"input": <string>}，保证与模型当初产出的
         // tool_use 逐字一致（Kiro/Bedrock 校验 tool_use/tool_result 配对）。
         "custom_tool_call" => {
-            let call_id = item
-                .get("call_id")
-                .or_else(|| item.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let call_id = response_call_item_id(item)
+                .ok_or_else(|| format!("input {ty} must contain a non-empty call_id"))?;
             let name = item
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -665,11 +743,8 @@ fn translate_input_item(
         }
         // 工具执行结果 → Anthropic 里属于 user 轮（function 与 custom 同构）
         "function_call_output" | "custom_tool_call_output" => {
-            let call_id = item
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let call_id = response_output_call_id(item)
+                .ok_or_else(|| format!("input {ty} must contain a non-empty call_id"))?;
             let content = stringify_output(item.get("output"));
             let block = json!({
                 "type": "tool_result",

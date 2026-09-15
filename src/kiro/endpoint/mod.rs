@@ -199,7 +199,8 @@ const CLIENT_VALIDATION_REASONS: &[&str] = &["TOOL_USE_RESULT_MISMATCH", "TOOL_S
 ///
 /// 例如 Bedrock 的 "Expected toolResult blocks ..." 纯文本错误。短语需具备
 /// 足够特异性，不会与正常响应内容冲突。
-const CLIENT_VALIDATION_MESSAGE_MARKERS: &[&str] = &["Expected toolResult blocks"];
+const CLIENT_VALIDATION_MESSAGE_MARKERS: &[&str] =
+    &["Expected toolResult blocks", "Invalid tool use format."];
 
 /// 默认的"客户端请求格式错误"判断逻辑
 ///
@@ -225,10 +226,31 @@ pub fn default_is_client_validation_error(body: &str) -> bool {
             return true;
         }
     }
-    // message 级兜底：纯文本错误报文（无结构化 reason）
+    // message 级兜底：JSON 响应只检查明确的 message 字段，并拒绝与已知
+    // 非客户端 reason 冲突的报文；纯文本响应才扫描整个 body。
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        let message = value
+            .get("message")
+            .or_else(|| value.pointer("/error/message"))
+            .and_then(|v| v.as_str());
+        let reason = value
+            .get("reason")
+            .or_else(|| value.pointer("/error/reason"))
+            .and_then(|v| v.as_str());
+        let marker_hit = message.is_some_and(|message| {
+            CLIENT_VALIDATION_MESSAGE_MARKERS
+                .iter()
+                .any(|marker| message.contains(marker))
+        });
+        let compatible_reason = reason.is_none_or(|reason| {
+            reason == "REQUEST_BODY_INVALID" || CLIENT_VALIDATION_REASONS.contains(&reason)
+        });
+        return marker_hit && compatible_reason;
+    }
+
     CLIENT_VALIDATION_MESSAGE_MARKERS
         .iter()
-        .any(|m| body.contains(m))
+        .any(|marker| body.contains(marker))
 }
 
 #[cfg(test)]

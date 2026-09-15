@@ -1123,7 +1123,10 @@ impl AdminService {
         &self,
         request: ModelTestRequest,
     ) -> Result<ModelTestResponse, AdminServiceError> {
-        let model_id = validate_model_id(&request.model_id)?;
+        let requested_model_id = validate_model_id(&request.model_id)?;
+        let backend_model_id = crate::anthropic::map_model(requested_model_id).ok_or_else(|| {
+            AdminServiceError::InvalidCredential("模型 ID 格式无效".to_string())
+        })?;
 
         let provider = self
             .kiro_provider
@@ -1134,7 +1137,8 @@ impl AdminService {
             .with_agent_task_type("vibe")
             .with_chat_trigger_type("MANUAL")
             .with_current_message(CurrentMessage::new(
-                UserInputMessage::new("Reply with exactly: OK", model_id).with_origin("AI_EDITOR"),
+                UserInputMessage::new("Reply with exactly: OK", &backend_model_id)
+                    .with_origin("AI_EDITOR"),
             ));
         let body = serde_json::to_string(&KiroRequest {
             conversation_state,
@@ -1206,7 +1210,7 @@ impl AdminService {
         }
 
         Ok(ModelTestResponse {
-            model_id: model_id.to_string(),
+            model_id: requested_model_id.to_string(),
             credential_id,
             latency_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             response_text,
@@ -2315,30 +2319,32 @@ impl AdminService {
     }
 
     async fn fetch_latest_release(&self) -> Result<UpdateCheckInfo, AdminServiceError> {
-        let url = format!(
+        let api_url = format!(
             "https://api.github.com/repos/{}/releases/latest",
             GITHUB_RELEASES_REPO
         );
         let token = self.update_config.lock().github_token.clone();
-        let mut req = reqwest::Client::new()
-            .get(&url)
+        let proxy = self.token_manager.proxy().map(|proxy| proxy.url.clone());
+        let client = super::binary_update::build_http_client(proxy.as_deref())?;
+        let mut request = client
+            .get(&api_url)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "kiro-rs-update-checker")
             .timeout(std::time::Duration::from_secs(15));
-        if let Some(t) = token.as_deref() {
-            let trimmed = t.trim();
-            if !trimmed.is_empty() {
-                req = req.header("Authorization", format!("Bearer {}", trimmed));
+        if let Some(token) = token.as_deref() {
+            let token = token.trim();
+            if !token.is_empty() {
+                request = request.header("Authorization", format!("Bearer {token}"));
             }
         }
-        let resp = req.send().await.map_err(|e| {
-            AdminServiceError::InternalError(format!("请求 GitHub API 失败: {}", e))
+        let response = request.send().await.map_err(|error| {
+            AdminServiceError::InternalError(format!("请求 GitHub API 失败: {error}"))
         })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             return Err(AdminServiceError::InternalError(format!(
                 "GitHub API 返回 {}: {}",
                 status,
@@ -2346,24 +2352,23 @@ impl AdminService {
             )));
         }
 
-        let release: GitHubRelease = resp.json().await.map_err(|e| {
-            AdminServiceError::InternalError(format!("解析 GitHub release 失败: {}", e))
+        let release: GitHubRelease = response.json().await.map_err(|error| {
+            AdminServiceError::InternalError(format!("解析 GitHub release 失败: {error}"))
         })?;
-
-        let current = env!("CARGO_PKG_VERSION").to_string();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
         let latest_version = release.tag_name.trim().trim_start_matches('v').to_string();
-        let has_update =
-            !latest_version.is_empty() && compare_semver(&current, &latest_version).is_lt();
+        let has_update = !latest_version.is_empty()
+            && compare_semver(&current_version, &latest_version).is_lt();
 
         Ok(UpdateCheckInfo {
-            current_version: current,
+            current_version,
             latest_version,
             has_update,
             build_type: self.update_config.lock().mode.as_str().to_string(),
-            release_name: Some(release.name).filter(|v| !v.is_empty()),
-            release_notes: Some(release.body).filter(|v| !v.is_empty()),
-            release_url: Some(release.html_url).filter(|v| !v.is_empty()),
-            published_at: Some(release.published_at).filter(|v| !v.is_empty()),
+            release_name: Some(release.name).filter(|value| !value.is_empty()),
+            release_notes: Some(release.body).filter(|value| !value.is_empty()),
+            release_url: Some(release.html_url).filter(|value| !value.is_empty()),
+            published_at: Some(release.published_at).filter(|value| !value.is_empty()),
             checked_at: Utc::now().to_rfc3339(),
             cached: false,
             warning: None,

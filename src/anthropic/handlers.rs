@@ -735,6 +735,10 @@ pub async fn post_messages(
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "消息列表为空".to_string())
                 }
+                ConversionError::InvalidToolPairing(reason) => (
+                    "invalid_request_error",
+                    format!("工具调用序列无效: {}", reason),
+                ),
                 ConversionError::UnsupportedToolMapping(reason) => (
                     "invalid_request_error",
                     format!("工具映射不支持: {}", reason),
@@ -1740,6 +1744,10 @@ pub async fn post_messages_cc(
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "消息列表为空".to_string())
                 }
+                ConversionError::InvalidToolPairing(reason) => (
+                    "invalid_request_error",
+                    format!("工具调用序列无效: {}", reason),
+                ),
                 ConversionError::UnsupportedToolMapping(reason) => (
                     "invalid_request_error",
                     format!("工具映射不支持: {}", reason),

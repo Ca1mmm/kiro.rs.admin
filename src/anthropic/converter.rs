@@ -577,6 +577,8 @@ pub struct ConversionResult {
 pub enum ConversionError {
     InvalidModel(String),
     EmptyMessages,
+    /// Tool calls and results must remain non-empty, unique, ordered, and paired.
+    InvalidToolPairing(String),
     /// Claude Code 工具无法映射到 Kiro 内置工具（如 Read.pages 无对应、内置缺 schema）。
     UnsupportedToolMapping(String),
 }
@@ -586,6 +588,9 @@ impl std::fmt::Display for ConversionError {
         match self {
             ConversionError::InvalidModel(reason) => write!(f, "无效模型 ID: {}", reason),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
+            ConversionError::InvalidToolPairing(reason) => {
+                write!(f, "工具调用序列无效: {}", reason)
+            }
             ConversionError::UnsupportedToolMapping(reason) => {
                 write!(f, "工具映射不支持: {}", reason)
             }
@@ -692,9 +697,23 @@ pub fn convert_request_with_mode(
         return Err(ConversionError::EmptyMessages);
     }
 
-    // 2.5. 预处理 prefill：如果末尾是 assistant，静默丢弃并截断到最后一条 user
-    // Claude 4.x 已弃用 assistant prefill，Kiro API 也不支持
+    // 2.5. 预处理 prefill：如果末尾是 assistant，只允许丢弃纯文本 prefill。
+    // 带 tool_use 的 assistant 尾消息是未闭合工具轮次，必须在本地拒绝。
     let messages: &[_] = if req.messages.last().is_some_and(|m| m.role != "user") {
+        let trailing = req.messages.last().unwrap();
+        let has_tool_block = trailing.content.as_array().is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                matches!(
+                    block.get("type").and_then(serde_json::Value::as_str),
+                    Some("tool_use") | Some("tool_result")
+                )
+            })
+        });
+        if has_tool_block {
+            return Err(ConversionError::InvalidToolPairing(
+                "trailing assistant tool blocks cannot be used as prefill".to_string(),
+            ));
+        }
         tracing::info!("检测到末尾 assistant 消息（prefill），静默丢弃");
         let last_user_idx = req
             .messages
@@ -740,7 +759,7 @@ pub fn convert_request_with_mode(
     }
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
-    let mut history = build_history(
+    let history = build_history(
         req,
         messages,
         &model_id,
@@ -748,16 +767,13 @@ pub fn convert_request_with_mode(
         tool_compatibility_mode,
     )?;
 
-    // 8. 验证并过滤 tool_use/tool_result 配对
-    // 移除孤立的 tool_result（没有对应的 tool_use）
-    // 同时返回孤立的 tool_use_id 集合，用于后续清理
-    let (validated_tool_results, orphaned_tool_use_ids) =
-        validate_tool_pairing(&history, &tool_results);
+    // 8. Fail closed on malformed tool history. Silently deleting one side of a
+    // pair changes the conversation and lets a bad current result become an
+    // unvalidated history result on the next client retry.
+    validate_tool_pairing_strict(&history, &tool_results)?;
+    let validated_tool_results = tool_results;
 
-    // 9. 从历史中移除孤立的 tool_use（Kiro API 要求 tool_use 必须有对应的 tool_result）
-    remove_orphaned_tool_uses(&mut history, &orphaned_tool_use_ids);
-
-    // 10. 收集历史中使用的工具名称，为缺失的工具生成占位符定义
+    // 9. 收集历史中使用的工具名称，为缺失的工具生成占位符定义
     // Kiro API 要求：历史消息中引用的工具必须在 tools 列表中有定义
     // 注意：Kiro 匹配工具名称时忽略大小写，所以这里也需要忽略大小写比较
     let history_tool_names = collect_history_tool_names(&history);
@@ -856,6 +872,15 @@ fn process_message_content_dedup(
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
+                let raw_type = item.get("type").and_then(serde_json::Value::as_str);
+                if matches!(raw_type, Some("tool_use") | Some("tool_result")) {
+                    serde_json::from_value::<ContentBlock>(item.clone()).map_err(|error| {
+                        ConversionError::InvalidToolPairing(format!(
+                            "malformed {} block: {error}",
+                            raw_type.unwrap_or("tool")
+                        ))
+                    })?;
+                }
                 if let Ok(block) = serde_json::from_value::<ContentBlock>(item.clone()) {
                     match block.block_type.as_str() {
                         "text" => {
@@ -872,21 +897,32 @@ fn process_message_content_dedup(
                             }
                         }
                         "tool_result" => {
-                            if let Some(tool_use_id) = block.tool_use_id {
-                                let result_content =
-                                    extract_tool_result_content(&block.content, &mut dedup, &mut images);
-                                let is_error = block.is_error.unwrap_or(false);
+                            let tool_use_id = block
+                                .tool_use_id
+                                .map(|id| id.trim().to_string())
+                                .filter(|id| !id.is_empty())
+                                .ok_or_else(|| {
+                                    ConversionError::InvalidToolPairing(
+                                        "tool_result must contain a non-empty tool_use_id"
+                                            .to_string(),
+                                    )
+                                })?;
+                            let result_content = extract_tool_result_content(
+                                &block.content,
+                                &mut dedup,
+                                &mut images,
+                            );
+                            let is_error = block.is_error.unwrap_or(false);
 
-                                let mut result = if is_error {
-                                    ToolResult::error(&tool_use_id, result_content)
-                                } else {
-                                    ToolResult::success(&tool_use_id, result_content)
-                                };
-                                result.status =
-                                    Some(if is_error { "error" } else { "success" }.to_string());
+                            let mut result = if is_error {
+                                ToolResult::error(&tool_use_id, result_content)
+                            } else {
+                                ToolResult::success(&tool_use_id, result_content)
+                            };
+                            result.status =
+                                Some(if is_error { "error" } else { "success" }.to_string());
 
-                                tool_results.push(result);
-                            }
+                            tool_results.push(result);
                         }
                         "tool_use" => {
                             // tool_use 在 assistant 消息中处理，这里忽略
@@ -978,8 +1014,133 @@ fn extract_tool_result_content(
     }
 }
 
+fn consume_tool_results_strict(
+    results: &[ToolResult],
+    location: &str,
+    pending: &mut std::collections::HashSet<String>,
+    seen_tool_results: &mut std::collections::HashSet<String>,
+) -> Result<(), ConversionError> {
+    let invalid = |reason: String| ConversionError::InvalidToolPairing(reason);
+    if results.is_empty() {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut ids: Vec<_> = pending.iter().cloned().collect();
+        ids.sort();
+        return Err(invalid(format!(
+            "{location} is missing tool_result blocks for: {}",
+            ids.join(", ")
+        )));
+    }
+
+    if pending.is_empty() {
+        return Err(invalid(format!(
+            "{location} contains tool_result blocks without a preceding tool_use"
+        )));
+    }
+
+    for result in results {
+        let id = result.tool_use_id.trim();
+        if id.is_empty() {
+            return Err(invalid(format!(
+                "{location} contains a tool_result with an empty tool_use_id"
+            )));
+        }
+        if !seen_tool_results.insert(id.to_string()) {
+            return Err(invalid(format!(
+                "{location} duplicates tool_result for tool_use_id {id}"
+            )));
+        }
+        if !pending.remove(id) {
+            return Err(invalid(format!(
+                "{location} contains an orphaned or out-of-order tool_result for tool_use_id {id}"
+            )));
+        }
+    }
+
+    if !pending.is_empty() {
+        let mut ids: Vec<_> = pending.iter().cloned().collect();
+        ids.sort();
+        return Err(invalid(format!(
+            "{location} does not resolve all pending tool_use blocks: {}",
+            ids.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the complete Kiro history plus the current user results without
+/// mutating either side. Tool results must immediately close the pending calls
+/// from the preceding assistant turn; unknown, duplicate, empty, or unresolved
+/// IDs are rejected locally instead of being forwarded upstream.
+fn validate_tool_pairing_strict(
+    history: &[Message],
+    current_tool_results: &[ToolResult],
+) -> Result<(), ConversionError> {
+    use std::collections::HashSet;
+
+    let invalid = |reason: String| ConversionError::InvalidToolPairing(reason);
+    let mut seen_tool_uses = HashSet::new();
+    let mut seen_tool_results = HashSet::new();
+    let mut pending = HashSet::new();
+
+    for (index, message) in history.iter().enumerate() {
+        match message {
+            Message::Assistant(assistant) => {
+                if !pending.is_empty() {
+                    let mut ids: Vec<_> = pending.iter().cloned().collect();
+                    ids.sort();
+                    return Err(invalid(format!(
+                        "history assistant message {index} appears before tool results for: {}",
+                        ids.join(", ")
+                    )));
+                }
+                if let Some(tool_uses) = &assistant.assistant_response_message.tool_uses {
+                    for tool_use in tool_uses {
+                        let id = tool_use.tool_use_id.trim();
+                        if id.is_empty() {
+                            return Err(invalid(format!(
+                                "history assistant message {index} contains a tool_use with an empty id"
+                            )));
+                        }
+                        if !seen_tool_uses.insert(id.to_string()) {
+                            return Err(invalid(format!(
+                                "history assistant message {index} duplicates tool_use id {id}"
+                            )));
+                        }
+                        pending.insert(id.to_string());
+                    }
+                }
+            }
+            Message::User(user) => {
+                let results = &user
+                    .user_input_message
+                    .user_input_message_context
+                    .tool_results;
+                consume_tool_results_strict(
+                    results,
+                    &format!("history user message {index}"),
+                    &mut pending,
+                    &mut seen_tool_results,
+                )?;
+            }
+        }
+    }
+
+    consume_tool_results_strict(
+        current_tool_results,
+        "current user message",
+        &mut pending,
+        &mut seen_tool_results,
+    )?;
+    Ok(())
+}
+
 /// 验证并过滤 tool_use/tool_result 配对
 ///
+/// Legacy filtering helper retained only for its historical unit tests. Production
+/// conversion uses `validate_tool_pairing_strict` above and never rewrites bad input.
+#[cfg(test)]
 /// 收集所有 tool_use_id，验证 tool_result 是否匹配
 /// 静默跳过孤立的 tool_use 和 tool_result，输出警告日志
 ///
@@ -1070,6 +1231,7 @@ fn validate_tool_pairing(
 /// # Arguments
 /// * `history` - 可变的历史消息列表
 /// * `orphaned_ids` - 需要移除的孤立 tool_use_id 集合
+#[cfg(test)]
 fn remove_orphaned_tool_uses(
     history: &mut [Message],
     orphaned_ids: &std::collections::HashSet<String>,
@@ -1765,6 +1927,15 @@ fn convert_assistant_message(
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
+                let raw_type = item.get("type").and_then(serde_json::Value::as_str);
+                if matches!(raw_type, Some("tool_use") | Some("tool_result")) {
+                    serde_json::from_value::<ContentBlock>(item.clone()).map_err(|error| {
+                        ConversionError::InvalidToolPairing(format!(
+                            "malformed {} block: {error}",
+                            raw_type.unwrap_or("tool")
+                        ))
+                    })?;
+                }
                 if let Ok(block) = serde_json::from_value::<ContentBlock>(item.clone()) {
                     match block.block_type.as_str() {
                         "thinking" => {
@@ -1778,14 +1949,29 @@ fn convert_assistant_message(
                             }
                         }
                         "tool_use" => {
-                            if let (Some(id), Some(name)) = (block.id, block.name) {
-                                let input = block.input.unwrap_or(serde_json::json!({}));
-                                let mapped_name =
-                                    map_client_tool_name_to_kiro(&name, tool_name_map, mode);
-                                let input = map_tool_input_to_kiro(&name, input, mode)?;
-                                tool_uses
-                                    .push(ToolUseEntry::new(id, mapped_name).with_input(input));
-                            }
+                            let id = block
+                                .id
+                                .map(|id| id.trim().to_string())
+                                .filter(|id| !id.is_empty())
+                                .ok_or_else(|| {
+                                    ConversionError::InvalidToolPairing(
+                                        "tool_use must contain a non-empty id".to_string(),
+                                    )
+                                })?;
+                            let name = block
+                                .name
+                                .map(|name| name.trim().to_string())
+                                .filter(|name| !name.is_empty())
+                                .ok_or_else(|| {
+                                    ConversionError::InvalidToolPairing(
+                                        "tool_use must contain a non-empty name".to_string(),
+                                    )
+                                })?;
+                            let input = block.input.unwrap_or(serde_json::json!({}));
+                            let mapped_name =
+                                map_client_tool_name_to_kiro(&name, tool_name_map, mode);
+                            let input = map_tool_input_to_kiro(&name, input, mode)?;
+                            tool_uses.push(ToolUseEntry::new(id, mapped_name).with_input(input));
                         }
                         _ => {}
                     }
