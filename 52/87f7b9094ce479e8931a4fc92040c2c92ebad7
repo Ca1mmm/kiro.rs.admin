@@ -1,0 +1,77 @@
+src/admin/service.rs
+  s_9d5309dc6bdc08::t_07f433e3f6af39 1213
+  s_9d5309dc6bdc08::t_86facd0a48dd70 1126,1140-1141
+  s_9d5309dc6bdc08::t_be35c59e61e35f 2335-2338,2341-2342,2345-2347,2355-2356,2358,2360-2361,2364,2368-2371
+  s_9d5309dc6bdc08::t_7614f1a55a2a19 1127-1129
+  s_7d2ce0abf2c273::t_00b7d618a2fc0a 2322,2327-2330
+src/anthropic/converter.rs
+  s_2412e44a71f4ef::t_272298726c1de6 1120-1125
+  s_2412e44a71f4ef::t_1ffbd339a42224 1952-1974
+  s_2412e44a71f4ef::t_82f45b57d0153a 1234
+  s_2412e44a71f4ef::t_69102ec1837dd9 708
+  s_2412e44a71f4ef::t_ac845e813178c2 875-883,1930-1938
+  s_2412e44a71f4ef::t_494d750d8338f6 1017-1071
+  s_2412e44a71f4ef::t_678dc68089cc3f 762,770-774,776
+  s_2412e44a71f4ef::t_f40bf74438d975 900-925
+  s_2412e44a71f4ef::t_5e40376b1d427d 1072-1119,1126-1129,1136-1138,1141-1143
+  s_2412e44a71f4ef::t_9c4242d1c16b85 700-701,703-707,709-716
+  s_2412e44a71f4ef::t_7a4ed2ea128b63 1130-1135
+  s_2412e44a71f4ef::t_2a3576fb609225 580-581,591-593
+src/anthropic/websearch_loop.rs
+  s_2412e44a71f4ef::t_58f8bb5583e662 406-409
+src/anthropic/handlers.rs
+  s_2412e44a71f4ef::t_6c308ead8895f3 738-741,1747-1750
+src/anthropic/responses.rs
+  s_2412e44a71f4ef::t_23a43afe0b5383 658
+  s_2412e44a71f4ef::t_1dad98fbc0b123 616-623,632-646,648-657,659-687
+  s_2412e44a71f4ef::t_2f322183801748 746
+  s_2412e44a71f4ef::t_99daed1ee07b01 139-143
+  s_2412e44a71f4ef::t_55bb7d8f41cf15 701,728
+  s_2412e44a71f4ef::t_c87d509b84f53c 330
+  s_2412e44a71f4ef::t_91b12623d32692 282-288
+  s_2412e44a71f4ef::t_9192c5d04ec6df 615,647,700,727
+  s_2412e44a71f4ef::t_42e9027c343215 747
+  s_2412e44a71f4ef::t_527ea78d10f66b 624-631
+src/kiro/endpoint/mod.rs
+  s_2412e44a71f4ef::t_5765d836531fdc 202-203
+  s_2412e44a71f4ef::t_5052ecfba40b82 229-250,253
+src/anthropic/mod.rs
+  s_9d5309dc6bdc08::t_d5c9c344c0bfcb 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.44-trip",
+  "base_commit_sha": "5287f7b9094ce479e8931a4fc92040c2c92ebad7",
+  "prompts": {},
+  "humans": {
+    "h_7e4133a0857d27": {
+      "author": "houwei.liu <houwei.liu@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_2412e44a71f4ef": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_e8a91735-c0b9-45b7-afe3-3f17718db2b0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    },
+    "s_7d2ce0abf2c273": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_deac981c-6b2d-4798-96b9-c3843099b396",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    },
+    "s_9d5309dc6bdc08": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_ead04981-95a4-4051-bd29-2c8ddf486087",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    }
+  }
+}
