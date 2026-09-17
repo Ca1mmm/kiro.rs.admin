@@ -1,0 +1,58 @@
+src/anthropic/responses_compaction.rs
+  s_1a6a9601770c4c::t_3a5626189eca7a 32-35
+  s_1a6a9601770c4c::t_f924fa4eae8cbf 178
+admin-ui/src/components/layout/app-layout.tsx
+  s_1a6a9601770c4c::t_1994741f35a723 4
+  s_1a6a9601770c4c::t_407f6bed4f2f20 36
+  s_1a6a9601770c4c::t_af2ec968abc3b7 65-70
+src/anthropic/handlers.rs
+  s_2412e44a71f4ef::t_6c308ead8895f3 831
+src/anthropic/responses.rs
+  s_1a6a9601770c4c::t_5f14888fda3fa8 314-324,328-332,334-343
+  s_2412e44a71f4ef::t_1dad98fbc0b123 715,791-792
+  s_2412e44a71f4ef::t_c87d509b84f53c 393
+  s_1a6a9601770c4c::t_bb0960c2743d6d 758-761,774-790
+  s_1a6a9601770c4c::t_d9a15cf1d2a507 333
+admin-ui/src/App.tsx
+  s_9d5309dc6bdc08::t_e777b8d6d5db63 198-199
+  s_9d5309dc6bdc08::t_ee8e400a503bd1 214
+src/admin/router.rs
+  s_9d5309dc6bdc08::t_8bee765a9b28d2 32-34
+MEMORY.md
+  s_1a6a9601770c4c::t_8003c5c23c3a45 40-51
+src/anthropic/converter.rs
+  s_2412e44a71f4ef::t_678dc68089cc3f 840-850
+  s_2412e44a71f4ef::t_1ffbd339a42224 2128-2135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.44-trip",
+  "base_commit_sha": "9c57f441ac4f38887a76f6347226c6ded3d2036a",
+  "prompts": {},
+  "sessions": {
+    "s_1a6a9601770c4c": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_6c54e6e5-cc9b-43e0-b758-a93e18bcbe2a",
+        "model": "claude-opus-5"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    },
+    "s_2412e44a71f4ef": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_e8a91735-c0b9-45b7-afe3-3f17718db2b0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    },
+    "s_9d5309dc6bdc08": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_ead04981-95a4-4051-bd29-2c8ddf486087",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    }
+  }
+}
