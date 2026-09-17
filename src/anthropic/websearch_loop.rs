@@ -36,7 +36,8 @@ use crate::token;
 
 use super::converter::{ConversionError, convert_request_with_mode, get_context_window_size};
 use super::handlers::{
-    RequestTracer, TraceUsage, UsageRecordHook, last_attempt_outcome, map_provider_error,
+    RequestTracer, TraceUsage, UsageRecordHook, UsageSource, last_attempt_outcome,
+    map_provider_error,
 };
 use super::stream::{CompletedToolUse, SseEvent};
 use super::types::{ErrorResponse, Message, MessagesRequest};
@@ -406,6 +407,10 @@ async fn run_round(
                 ConversionError::InvalidToolPairing(reason) => (
                     "invalid_request_error",
                     format!("invalid tool call sequence: {}", reason),
+                ),
+                ConversionError::InvalidMessageSequence(reason) => (
+                    "invalid_request_error",
+                    format!("invalid message sequence: {}", reason),
                 ),
                 ConversionError::UnsupportedToolMapping(reason) => (
                     "invalid_request_error",
@@ -779,6 +784,9 @@ struct WebSearchUsageSettlement {
     usage: TokenUsage,
     credits: f64,
     settled: bool,
+    /// 多轮聚合后的 usage 来源：全部轮次都有上游精确值才算 provider，
+    /// 任一轮回退到本地估算即降级为 none（web_search 回退不走 CacheMeter，缓存恒为 0）。
+    source: UsageSource,
 }
 
 impl WebSearchUsageSettlement {
@@ -790,6 +798,7 @@ impl WebSearchUsageSettlement {
             usage: TokenUsage::default(),
             credits: 0.0,
             settled: false,
+            source: UsageSource::Unknown,
         }
     }
 
@@ -802,6 +811,7 @@ impl WebSearchUsageSettlement {
             usage: TokenUsage::default(),
             credits: 0.0,
             settled: false,
+            source: UsageSource::Unknown,
         }
     }
 
@@ -813,6 +823,15 @@ impl WebSearchUsageSettlement {
         if credits.is_finite() && credits > 0.0 {
             self.credits += credits;
         }
+    }
+
+    /// 记录本轮 usage 是否来自上游精确值。
+    fn note_source(&mut self, from_provider: bool) {
+        self.source = match (self.source, from_provider) {
+            (UsageSource::Unknown, true) => UsageSource::Provider,
+            (UsageSource::Provider, true) => UsageSource::Provider,
+            _ => UsageSource::None,
+        };
     }
 
     fn usage(&self) -> TokenUsage {
@@ -844,6 +863,7 @@ impl WebSearchUsageSettlement {
                 error_message,
                 self.usage,
                 self.credits,
+                self.source,
             );
         }
         self.settled = true;
@@ -1234,7 +1254,7 @@ async fn execute_web_search(
     Ok(result)
 }
 
-fn aggregated_trace_usage(usage: TokenUsage, credits: f64) -> TraceUsage {
+fn aggregated_trace_usage(usage: TokenUsage, credits: f64, source: UsageSource) -> TraceUsage {
     let usage = usage.sanitized();
     TraceUsage {
         input_tokens: usage.uncached_input_tokens as u64,
@@ -1246,6 +1266,7 @@ fn aggregated_trace_usage(usage: TokenUsage, credits: f64) -> TraceUsage {
         } else {
             0.0
         },
+        source,
     }
 }
 
@@ -1256,13 +1277,14 @@ fn finalize_aggregated_trace(
     error_message: Option<&str>,
     usage: TokenUsage,
     credits: f64,
+    source: UsageSource,
 ) {
     tracer.finalize(
         status,
         error_type,
         error_message,
         None,
-        aggregated_trace_usage(usage, credits),
+        aggregated_trace_usage(usage, credits, source),
     );
 }
 
@@ -1406,6 +1428,7 @@ async fn run_web_search_loop_inner(
                 round.resolved_token_usage(round_fallback_input_tokens),
                 round.credits,
             );
+            settlement.note_source(round.provider_token_usage.is_some());
             // 跨 round 保留最近一次 meteringEvent，多 round 时取最后一次
             // (clone 以避免与 empty_tool_result_disposition 后续对 round 的借用冲突)。
             if let Some(ref m) = round.last_metering {
@@ -2252,6 +2275,7 @@ mod tests {
             thinking: None,
             output_config: None,
             metadata: None,
+            cache_control: None,
         }
     }
 
@@ -3057,12 +3081,14 @@ mod tests {
                 cache_write_input_tokens: 4,
             },
             0.125,
+            UsageSource::Provider,
         );
         assert_eq!(trace.input_tokens, 3);
         assert_eq!(trace.output_tokens, 5);
         assert_eq!(trace.cache_creation_tokens, 4);
         assert_eq!(trace.cache_read_tokens, 7);
         assert_eq!(trace.credits, 0.125);
+        assert_eq!(trace.source, UsageSource::Provider);
 
         let sanitized = aggregated_trace_usage(
             TokenUsage {
@@ -3072,6 +3098,7 @@ mod tests {
                 cache_write_input_tokens: -4,
             },
             f64::NAN,
+            UsageSource::None,
         );
         assert_eq!(sanitized.input_tokens, 0);
         assert_eq!(sanitized.output_tokens, 0);
