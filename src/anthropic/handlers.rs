@@ -1237,8 +1237,6 @@ fn stream_trace_usage(ctx: &StreamContext) -> TraceUsage {
     }
 }
 
-use super::converter::get_context_window_size;
-
 pub(crate) enum NonStreamExecutionError {
     Provider(Error),
     Response(Response),
