@@ -369,12 +369,6 @@ async fn main() {
                 // Axum 0.8 的 nest 根路径匹配 `/admin`，但不会匹配 `/admin/`。
                 .route("/admin/", get(admin_ui::index_handler))
                 .nest("/admin", admin_ui_app)
-                .route(
-                    "/admin/",
-                    axum::routing::get(|| async {
-                        axum::response::Redirect::temporary("/admin")
-                    }),
-                )
         }
     } else {
         anthropic_app
