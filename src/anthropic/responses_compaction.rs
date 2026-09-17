@@ -242,13 +242,17 @@ async fn run_attempt(
         anthropic_req.tools.clone(),
     ) as i32;
     let hook = UsageRecordHook::from_state(&state, key_ctx.key_id, model.to_string());
-    let cache_usage = state
-        .cache_meter
-        .as_ref()
-        .map(|cache| {
-            super::super::cache_metering::compute_cache_usage(cache, &anthropic_req, key_ctx.key_id)
-        })
-        .unwrap_or_default();
+    let cache_usage = match state.cache_meter.as_ref() {
+        Some(cache) => {
+            super::super::cache_metering::compute_cache_usage(
+                cache,
+                &anthropic_req,
+                key_ctx.key_id,
+            )
+            .await
+        }
+        None => super::super::cache_metering::CacheUsage::default(),
+    };
     let tracer = new_non_stream_request_tracer(&state, key_ctx.clone(), model.to_string());
     let anthropic = execute_non_stream_request(
         provider,
@@ -1060,6 +1064,7 @@ mod tests {
             metadata: None,
             thinking: None,
             output_config: None,
+            cache_control: None,
         };
         assert!(matches!(
             convert_compact(&request),
@@ -1273,6 +1278,7 @@ mod tests {
             metadata: None,
             thinking: None,
             output_config: None,
+            cache_control: None,
         };
         let wrapper = super::super::super::converter::convert_request_with_mode(
             &request,
