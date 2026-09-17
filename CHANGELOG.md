@@ -10,6 +10,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 🎨 Admin UI — 主题、布局与操作体验
 
+> 来源：[PR #86](https://github.com/ZyphrZero/kiro.rs/pull/86)、[PR #89](https://github.com/ZyphrZero/kiro.rs/pull/89) 与 [PR #90](https://github.com/ZyphrZero/kiro.rs/pull/90)。提交人：[@bestK](https://github.com/bestK)，感谢贡献。后续主题、表格可用性与移动端调整由 [@ZyphrZero](https://github.com/ZyphrZero) 补充。
+
 - 控制台采用固定侧栏与独立内容滚动区域，统一六个业务页面的标题、面包屑和操作区；窄屏使用紧凑操作菜单，避免快捷按钮挤掉页面标题。
 - 提供清透青、石墨灰、海洋蓝、松林绿和琥珀金五套完整配色，主题同时作用于页面背景、侧栏、选中态、悬停色与焦点色；分别校准深浅模式，主题菜单加入配色预览，并保留偏好记忆与跟随系统。
 - 统一常用控件圆角，弱化卡片边框和分隔线，使用轻量阴影区分层次；图表坐标文字跟随主题，提高深色模式下的可读性。
@@ -21,6 +23,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 📊 Prompt Cache — 计量语义与来源区分
 
+> 来源：[PR #86](https://github.com/ZyphrZero/kiro.rs/pull/86)、[PR #88](https://github.com/ZyphrZero/kiro.rs/pull/88) 与 [PR #90](https://github.com/ZyphrZero/kiro.rs/pull/90)。提交人：[@bestK](https://github.com/bestK)，感谢贡献。PR #88 中的计费折扣映射已由 PR #90 移除，下文描述本版最终行为。
+
 - 本地缓存计量支持顶层自动 `cache_control` 与显式块级断点，按已声明断点匹配前缀；未声明缓存控制时不模拟缓存命中。
 - 支持最多四个断点、20 个块位置的回溯匹配，以及 `5m` / `1h` 独立 TTL 与命中续期；校验混合 TTL 顺序、无效断点和缓存隔离，保持输入、缓存创建与读取 Token 总量一致。
 - 增加可选 Redis 共享计量元数据与并发协调，用于多实例部署；该机制只参与计量估算，不存储模型 KV Cache。
@@ -29,12 +33,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### ✨ 会话路由与请求追踪
 
+> 来源：[PR #90](https://github.com/ZyphrZero/kiro.rs/pull/90)。提交人：[@bestK](https://github.com/bestK)，感谢贡献。
+
 - 新增会话粘性路由：同一 `conversationId` 优先沿用上一轮成功的凭据；凭据禁用、冷却、限流、模型或分组不匹配时，回到现有调度策略。
 - 提供 `sessionAffinityEnabled`、`sessionAffinityTtlSecs` 配置与管理端开关、有效期及命中统计；仅在上游成功后建立或续期绑定。
 - 请求日志新增会话 ID、粘性命中结果、上一凭据、计量来源和客户端 IP，支持按会话、换号与 IP 筛选；凭据页面补充 Profile 信息，便于排查缓存与路由行为。
 - 日志 Token 列展示未缓存输入、输出、缓存读取与写入明细；首 Token 延迟和总耗时合并展示，并按各自阈值着色。
 
 ### 🔧 Responses / Codex — 远程压缩与工具兼容
+
+> 来源：[PR #81](https://github.com/ZyphrZero/kiro.rs/pull/81)、[PR #82](https://github.com/ZyphrZero/kiro.rs/pull/82)，提交人：[@lijmyeah](https://github.com/lijmyeah)；[PR #83](https://github.com/ZyphrZero/kiro.rs/pull/83)，提交人：[@stormrise](https://github.com/stormrise)。感谢贡献。远程压缩的合并适配与测试修复由 [@ZyphrZero](https://github.com/ZyphrZero) 补充。
 
 - 接入并加固 Codex 远程上下文压缩流程（PR #81）：识别末尾 `compaction_trigger`，将历史转换为摘要请求，返回可在后续请求中恢复的 `compaction` 项，支持 JSON 与 SSE 响应。
 - 压缩路径保留最新用户输入和历史工具调用结构，处理未完成的工具结果；遇到上下文溢出时，对过大的历史工具输出限量后重试一次。
@@ -43,6 +51,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - `GET /v1/models` 新增 `context_window`，由上游 `maxInputTokens` 提供，与管理端模型元数据保持一致。
 
 ### 🔧 Kiro 凭据与区域兼容
+
+> 来源：[PR #78](https://github.com/ZyphrZero/kiro.rs/pull/78)。提交人：[@gujunxiang](https://github.com/gujunxiang)，感谢贡献。[Issue #91](https://github.com/ZyphrZero/kiro.rs/issues/91) 的凭据区域修复由 [@ZyphrZero](https://github.com/ZyphrZero) 完成。
 
 - 修复仅配置凭据 `region` 时推理请求仍使用全局区域的问题（#91）；API 区域优先级调整为 `credential.apiRegion → credential.region → config.apiRegion → config.region`，同时覆盖 IDE / CLI 的推理、MCP URL 与 Host。
 - 用量和模型列表请求携带 `profileArn` 遇到特定租户兼容错误时，可重试不带 ARN 的请求，并保留已有区域回退逻辑；普通客户端错误不会无条件重复发送。
