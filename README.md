@@ -743,8 +743,10 @@ credential.authRegion -> credential.region -> config.authRegion -> config.region
 API 请求：
 
 ```text
-credential.apiRegion -> config.apiRegion -> config.region
+credential.apiRegion -> credential.region -> config.apiRegion -> config.region
 ```
+
+仅配置凭据 `region` 时，Token 刷新和 API 请求都默认使用该区域。需要分开设置时，使用凭据级 `authRegion` 和 `apiRegion`；`authRegion` 本身不作为 API 请求区域的回退值。
 
 部分 REST / 管理类上游接口只在 `us-east-1` 和 `eu-central-1` 提供服务，代码会按账号区域选择候选端点并在必要时回退。
 

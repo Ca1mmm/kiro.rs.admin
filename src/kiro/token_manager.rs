@@ -6276,13 +6276,13 @@ mod tests {
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
-        credentials.region = Some("eu-west-1".to_string());
+        credentials.region = Some("eu-central-1".to_string());
 
-        // 凭据.region 不参与 api_region 回退链
+        // 未显式指定 api_region 时，凭据.region 优先于全局区域。
         let api_region = credentials.effective_api_region(&config);
         let api_host = format!("q.{}.amazonaws.com", api_region);
 
-        assert_eq!(api_host, "q.us-west-2.amazonaws.com");
+        assert_eq!(api_host, "q.eu-central-1.amazonaws.com");
     }
 
     #[test]
