@@ -629,6 +629,21 @@ fn response_output_call_id(item: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Codex Desktop injects automation context as an unpaired function output.
+/// It is application context rather than a real tool result, so it must not
+/// participate in Kiro's strict tool call/result replay validation.
+fn is_codex_automation_update_context(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("function_call_output")
+        && item.get("call_id").is_none()
+        && item.get("name").and_then(Value::as_str) == Some("automation_update")
+        && item.get("namespace").and_then(Value::as_str) == Some("codex_app")
+        && item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|id| id.len() > "fco_".len() && id.starts_with("fco_"))
+}
+
 /// Validate the complete replay before converting it. Kiro requires tool calls and
 /// results to be non-empty, unique, ordered, and fully paired. In particular, do
 /// not let an orphaned current result become an unvalidated history result on the
@@ -655,6 +670,9 @@ fn validate_tool_replay(items: &[Value]) -> Result<(), String> {
                 pending.insert(call_id);
             }
             "function_call_output" | "custom_tool_call_output" => {
+                if is_codex_automation_update_context(item) {
+                    continue;
+                }
                 let call_id = response_output_call_id(item).ok_or_else(|| {
                     format!("input item {index} ({item_type}) must contain a non-empty call_id")
                 })?;
@@ -743,6 +761,17 @@ fn translate_input_item(
         }
         // 工具执行结果 → Anthropic 里属于 user 轮（function 与 custom 同构）
         "function_call_output" | "custom_tool_call_output" => {
+            if is_codex_automation_update_context(item) {
+                let content = stringify_output(item.get("output"));
+                let text = if content.is_empty() {
+                    "[codex_app.automation_update]".to_string()
+                } else {
+                    format!("[codex_app.automation_update]\n{content}")
+                };
+                push_merged(merged, "user", vec![json!({"type": "text", "text": text})]);
+                return Ok(());
+            }
+
             let call_id = response_output_call_id(item)
                 .ok_or_else(|| format!("input {ty} must contain a non-empty call_id"))?;
             let content = stringify_output(item.get("output"));
@@ -2688,6 +2717,104 @@ mod tests {
         let (anth, _) = responses_to_anthropic(req, None).unwrap();
         let tr = &anth.messages[2].content.as_array().unwrap()[0];
         assert_eq!(tr["content"], "line1\nline2");
+    }
+
+    #[test]
+    fn codex_app_automation_update_becomes_user_context() {
+        let req = req_with(
+            json!([]),
+            json!([
+                {
+                    "type": "function_call_output",
+                    "id": "fco_automation_1",
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "output": [
+                        { "type": "output_text", "text": "automation id: daily-review" },
+                        { "type": "output_text", "text": "memory: /tmp/memory.md" },
+                    ],
+                },
+                { "type": "message", "role": "user", "content": "run the automation" },
+            ]),
+        );
+
+        let (anth, _) = responses_to_anthropic(req, None).unwrap();
+        assert_eq!(anth.messages.len(), 1);
+        assert_eq!(anth.messages[0].role, "user");
+        let blocks = anth.messages[0].content.as_array().unwrap();
+        assert_eq!(
+            blocks[0]["text"],
+            "[codex_app.automation_update]\nautomation id: daily-review\nmemory: /tmp/memory.md"
+        );
+        assert_eq!(blocks[1]["text"], "run the automation");
+        assert!(blocks.iter().all(|block| block["type"] != "tool_result"));
+    }
+
+    #[test]
+    fn orphan_function_output_still_requires_call_id() {
+        let req = req_with(
+            json!([]),
+            json!([{
+                "type": "function_call_output",
+                "id": "fco_not_automation_context",
+                "name": "some_tool",
+                "namespace": "codex_app",
+                "output": "unexpected",
+            }]),
+        );
+
+        let error = responses_to_anthropic(req, None).unwrap_err();
+        assert!(error.contains("must contain a non-empty call_id"));
+    }
+
+    #[test]
+    fn automation_update_with_present_invalid_call_id_is_rejected() {
+        for invalid_call_id in [json!(null), json!(""), json!(42)] {
+            let req = req_with(
+                json!([]),
+                json!([{
+                    "type": "function_call_output",
+                    "id": "fco_automation_1",
+                    "call_id": invalid_call_id,
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "output": "unexpected",
+                }]),
+            );
+
+            let error = responses_to_anthropic(req, None).unwrap_err();
+            assert!(error.contains("must contain a non-empty call_id"));
+        }
+    }
+
+    #[test]
+    fn paired_automation_update_remains_a_tool_result() {
+        let req = req_with(
+            json!([]),
+            json!([
+                {
+                    "type": "function_call",
+                    "call_id": "call_automation_1",
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "id": "fco_automation_1",
+                    "call_id": "call_automation_1",
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "output": "updated",
+                },
+            ]),
+        );
+
+        let (anth, _) = responses_to_anthropic(req, None).unwrap();
+        let result = &anth.messages[1].content.as_array().unwrap()[0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "call_automation_1");
+        assert_eq!(result["content"], "updated");
     }
 
     #[test]
