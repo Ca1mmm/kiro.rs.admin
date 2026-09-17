@@ -454,14 +454,14 @@ export function AppLayout({
               variant="ghost"
               size="icon"
               asChild
-              title="Telegram 讨论群组：kiro.rs dev"
+              title="Telegram 讨论群组：kiro.rs"
               className="h-8 w-8 text-[#229ED9] hover:text-[#1D8FC4] hidden sm:inline-flex"
             >
               <a
                 href="https://t.me/+SXAjVkZDWFUyMWVl"
                 target="_blank"
                 rel="noopener noreferrer"
-                aria-label="Telegram 讨论群组：kiro.rs dev"
+                aria-label="Telegram 讨论群组：kiro.rs"
               >
                 <TelegramIcon className="size-3.5" />
               </a>

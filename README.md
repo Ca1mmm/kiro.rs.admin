@@ -2,7 +2,7 @@
 
 **该项目基于 [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs) 进行的二次开发**
 
-Telegram 讨论群组：[kiro.rs dev](https://t.me/+SXAjVkZDWFUyMWVl)
+Telegram 讨论群组：[kiro.rs](https://t.me/+SXAjVkZDWFUyMWVl)
 
 `kiro-rs` 是一个用 Rust 编写的 Anthropic Messages API 与 OpenAI Chat Completions / Responses API 兼容代理。它把 `/v1/messages`、`/v1/chat/completions`、`/v1/responses` 等请求转换为 Kiro / Amazon Q 后端请求，并提供一个可选的 Web Admin 面板来管理凭据、客户端 Key、用量、代理池、请求日志和在线更新。
 
@@ -869,7 +869,7 @@ git diff --check
 
 欢迎到 [linux.do](https://linux.do/) 交流、分享和反馈。
 
-也欢迎加入 [Telegram 讨论群组：kiro.rs dev](https://t.me/+SXAjVkZDWFUyMWVl)。
+也欢迎加入 [Telegram 讨论群组：kiro.rs](https://t.me/+SXAjVkZDWFUyMWVl)。
 
 <a id="acknowledgements"></a>
 ## 🙏 致谢
