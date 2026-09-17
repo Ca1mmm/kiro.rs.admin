@@ -1,0 +1,24 @@
+src/anthropic/responses.rs
+  s_3b1b0543d708cc::t_667862904c8a85 2723-2770
+  s_3b1b0543d708cc::t_2f1bc9c61d6442 2771-2819
+  s_3b1b0543d708cc::t_7cd4c176276d88 632-636,638-646
+  s_3b1b0543d708cc::t_d4443f85d71850 673-675
+  s_3b1b0543d708cc::t_cc49e0f40fabf8 637
+  s_3b1b0543d708cc::t_4f704619405d0a 764-774
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.44-trip",
+  "base_commit_sha": "0bf0c5eb035c84d0bea7971aec9ab60ca8da2ed3",
+  "prompts": {},
+  "sessions": {
+    "s_3b1b0543d708cc": {
+      "agent_id": {
+        "tool": "kiro-desktop",
+        "id": "sess_942592f0-41b9-4455-b765-a5b046e9ee33",
+        "model": "claude-opus-5"
+      },
+      "human_author": "houwei.liu <houwei.liu@trip.com>"
+    }
+  }
+}
